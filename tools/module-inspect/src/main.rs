@@ -23,5 +23,22 @@ fn main() -> io::Result<()> {
     println!("format={:?}", package.format);
     println!("target={:?}", package.target);
     println!("payload_bytes={}", package.payload.len());
+
+    let mut count = 0;
+    package
+        .for_each_requirement(|req| {
+            count += 1;
+            let id = req.id.as_str().unwrap_or("(invalid utf-8)");
+            println!(
+                "capability={} version={}.{}",
+                id, req.min_version.major, req.min_version.minor
+            );
+            Ok(())
+        })
+        .map_err(|error| io::Error::other(format!("invalid capability list: {error:?}")))?;
+    if count == 0 {
+        println!("capabilities=none");
+    }
+
     Ok(())
 }

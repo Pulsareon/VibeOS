@@ -1,13 +1,15 @@
 #![no_std]
 #![no_main]
 
+pub mod capability;
+
 use core::ffi::c_void;
 use core::panic::PanicInfo;
 
-type EfiHandle = *mut c_void;
-type EfiStatus = usize;
+pub type EfiHandle = *mut c_void;
+pub type EfiStatus = usize;
 
-const EFI_SUCCESS: EfiStatus = 0;
+pub const EFI_SUCCESS: EfiStatus = 0;
 const ENTER: u16 = 13;
 const BACKSPACE: u16 = 8;
 const MODE_TTY: u8 = 0;
@@ -72,7 +74,7 @@ struct EfiSystemTable {
     configuration_table: *mut c_void,
 }
 
-struct Console {
+pub struct Console {
     input: *mut SimpleTextInputProtocol,
     output: *mut SimpleTextOutputProtocol,
 }
@@ -125,6 +127,7 @@ extern "efiapi" fn efi_main(_image: EfiHandle, system_table: *mut EfiSystemTable
     };
 
     let mut shell_mode = MODE_TTY;
+    let mut _registry = unsafe { capability::UefiCapabilityRegistry::new(&mut console) };
     unsafe { draw_shell(&mut console, shell_mode) };
 
     let mut intent = [0u16; 192];

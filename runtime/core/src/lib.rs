@@ -1,6 +1,13 @@
 #![no_std]
 
+pub mod bytecode;
+pub mod c_abi;
+pub mod capability;
 pub mod module;
+
+pub use capability::{
+    Capability, CapabilityId, CapabilityRegistry, CapabilityRequirement, CapabilityVersion,
+};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const OP_VIBE_CLI: u8 = 0x01;
@@ -38,6 +45,9 @@ pub enum Error {
     Ai,
     Storage,
     Transport,
+    CapabilityNotFound,
+    CapabilityVersionMismatch,
+    CapabilityBufferTooSmall,
 }
 
 pub trait Vibe {

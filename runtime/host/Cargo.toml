@@ -12,3 +12,5 @@ path = "src/main.rs"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde_json = "1"
 vibeos-core = { path = "../core" }
+libloading = "0.8"
+tempfile = "3"

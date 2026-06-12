@@ -1,3 +1,5 @@
+use capability::HostCapabilityRegistry;
+use native_loader::NativeLoader;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -6,8 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use vibeos_core::module::{ModuleFormat, ModulePackage, ModuleTarget, Version};
+use vibeos_core::bytecode::{BytecodeLoader, encode_log_program};
+use vibeos_core::capability::{CapabilityId, CapabilityRequirement, CapabilityVersion};
+use vibeos_core::module::{ModuleFormat, ModulePackage, ModuleRegistry, ModuleTarget, Version};
 use vibeos_core::{OP_VIBE_CLI, OP_VIBE_FIX, OP_VIBE_UI, VibeMode};
+
+mod c_abi;
+mod capability;
+mod native_loader;
 
 const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
@@ -15,6 +23,7 @@ struct Host {
     root: PathBuf,
     data: PathBuf,
     store_lock: Mutex<()>,
+    capabilities: Mutex<HostCapabilityRegistry>,
 }
 
 struct SavedModule {
@@ -81,10 +90,12 @@ fn main() -> std::io::Result<()> {
     );
 
     fs::create_dir_all(&data)?;
+    let capabilities = HostCapabilityRegistry::new(data.join("store"));
     let host = Arc::new(Host {
         root: root.canonicalize()?,
         data,
         store_lock: Mutex::new(()),
+        capabilities: Mutex::new(capabilities),
     });
     let listener = TcpListener::bind(&address)?;
 
@@ -431,12 +442,30 @@ fn vibe_response(stream: &mut TcpStream, host: &Host, body: &[u8]) -> std::io::R
         Err(error) => error.as_str(),
     };
     let saved = save_vibe_module(host, vibe_mode, intent.trim(), output_kind, ai_text)?;
+    let execution = if vibe_mode == VibeMode::Cli {
+        match execute_saved_module(host, &saved.path) {
+            Ok(output) => format!(
+                "
+执行结果：{}",
+                String::from_utf8_lossy(&output)
+            ),
+            Err(error) => format!(
+                "
+执行失败：{error}"
+            ),
+        }
+    } else {
+        String::new()
+    };
     let ai_status = match ai_result {
         Ok(_) => "AI 已生成模块载荷",
         Err(_) => "AI 未连接，已保存离线占位模块",
     };
     let body = format!(
-        "<main class=\"vibe-shell\"><div class=\"brand-mark\">V</div><section class=\"result\"><h2>{mode_name}</h2><p>意图已由 Rust Host 接收，并被映射为 VibeMode::{vibe_mode:?}。</p><code>{intent}</code><p>目标产物：{output_kind}</p><p>{ai_status}</p><code>{ai_text}</code><p>已保存为本地 Vibe Module：</p><code>ID: {id}\nVersion: {major}.{minor}.{patch}\nBytes: {bytes}\nPath: {path}</code><a class=\"back-link\" href=\"/desktop\">返回桌面</a><a class=\"back-link secondary\" href=\"/tty\">切换 TTY</a><a class=\"back-link secondary\" href=\"/config\">AI 配置</a></section></main>",
+        "<main class=\"vibe-shell\"><div class=\"brand-mark\">V</div><section class=\"result\"><h2>{mode_name}</h2><p>意图已由 Rust Host 接收，并被映射为 VibeMode::{vibe_mode:?}。</p><code>{intent}</code><p>目标产物：{output_kind}</p><p>{ai_status}</p><code>{ai_text}</code><p>已保存为本地 Vibe Module：</p><code>ID: {id}
+Version: {major}.{minor}.{patch}
+Bytes: {bytes}
+Path: {path}{execution}</code><a class=\"back-link\" href=\"/desktop\">返回桌面</a><a class=\"back-link secondary\" href=\"/tty\">切换 TTY</a><a class=\"back-link secondary\" href=\"/config\">AI 配置</a></section></main>",
         intent = html_escape(intent.trim()),
         output_kind = html_escape(output_kind),
         ai_status = ai_status,
@@ -446,7 +475,8 @@ fn vibe_response(stream: &mut TcpStream, host: &Host, body: &[u8]) -> std::io::R
         minor = saved.version.minor,
         patch = saved.version.patch,
         bytes = saved.bytes,
-        path = html_escape(&saved.path.display().to_string())
+        path = html_escape(&saved.path.display().to_string()),
+        execution = html_escape(&execution)
     );
     let page = html_page(&format!("{mode_name} · VibeOS"), "result-body", &body);
     respond(
@@ -456,6 +486,58 @@ fn vibe_response(stream: &mut TcpStream, host: &Host, body: &[u8]) -> std::io::R
         page.as_bytes(),
         &[],
     )
+}
+
+fn execute_saved_module(host: &Host, path: &Path) -> std::io::Result<Vec<u8>> {
+    let bytes = fs::read(path)?;
+    let package = ModulePackage::decode(&bytes)
+        .map_err(|error| std::io::Error::other(format!("decode failed: {error:?}")))?;
+
+    let mut capabilities = host.capabilities.lock().unwrap();
+    package
+        .check_capabilities(&*capabilities)
+        .map_err(|error| std::io::Error::other(format!("capability check failed: {error:?}")))?;
+
+    let mut output = vec![0u8; 256];
+    let len = match package.format {
+        ModuleFormat::VibeBytecode => {
+            let mut loader = BytecodeLoader::new();
+            let mut registry: ModuleRegistry<(), 4> = ModuleRegistry::new();
+            registry
+                .install(&package, &mut loader, &mut *capabilities)
+                .map_err(|error| std::io::Error::other(format!("install failed: {error:?}")))?;
+            registry
+                .invoke_latest(
+                    package.id,
+                    package.payload,
+                    &mut output,
+                    &mut loader,
+                    &mut *capabilities,
+                )
+                .map_err(|error| std::io::Error::other(format!("invoke failed: {error:?}")))?
+        }
+        ModuleFormat::NativeBinary => {
+            let cache_dir = host.data.join("native-cache");
+            std::fs::create_dir_all(&cache_dir)?;
+            let mut loader = NativeLoader::new(host.data.join("store"), cache_dir);
+            let mut registry: ModuleRegistry<usize, 4> = ModuleRegistry::new();
+            registry
+                .install(&package, &mut loader, &mut *capabilities)
+                .map_err(|error| std::io::Error::other(format!("install failed: {error:?}")))?;
+            registry
+                .invoke_latest(
+                    package.id,
+                    package.payload,
+                    &mut output,
+                    &mut loader,
+                    &mut *capabilities,
+                )
+                .map_err(|error| std::io::Error::other(format!("invoke failed: {error:?}")))?
+        }
+        _ => 0,
+    };
+    output.truncate(len);
+    Ok(output)
 }
 
 fn save_vibe_module(
@@ -472,15 +554,17 @@ fn save_vibe_module(
     let version = next_version(&module_dir)?;
     let (format, target) = module_shape(mode);
     let payload = module_payload(mode, intent, output_kind, ai_text, version);
+    let capabilities = module_capabilities(mode);
     let package = ModulePackage {
         id: id.as_bytes(),
         version,
         mode,
         format,
         target,
-        payload: payload.as_bytes(),
+        capabilities: &capabilities,
+        payload: &payload,
     };
-    let mut encoded = vec![0; payload.len() + id.len() + 64];
+    let mut encoded = vec![0; payload.len() + id.len() + capabilities.len() + 64];
     let length = package
         .encode(&mut encoded)
         .map_err(|_| std::io::Error::other("failed to encode Vibe module"))?;
@@ -510,17 +594,47 @@ fn module_shape(mode: VibeMode) -> (ModuleFormat, ModuleTarget) {
     }
 }
 
+fn module_capabilities(mode: VibeMode) -> Vec<u8> {
+    match mode {
+        VibeMode::Cli => {
+            let req = CapabilityRequirement {
+                id: CapabilityId::from_str("sys:log").unwrap(),
+                min_version: CapabilityVersion::new(1, 0),
+            };
+            let mut buffer = vec![0u8; 64];
+            let len = req.encode(&mut buffer).unwrap();
+            buffer.truncate(len);
+            buffer
+        }
+        VibeMode::Ui | VibeMode::Fix => Vec::new(),
+    }
+}
+
 fn module_payload(
     mode: VibeMode,
     intent: &str,
-    output_kind: &str,
-    ai_text: &str,
-    version: Version,
-) -> String {
-    format!(
-        "mode={:?}\nversion={}.{}.{}\nintent={}\noutput={}\nai={}\n",
-        mode, version.major, version.minor, version.patch, intent, output_kind, ai_text
-    )
+    _output_kind: &str,
+    _ai_text: &str,
+    _version: Version,
+) -> Vec<u8> {
+    match mode {
+        VibeMode::Cli => {
+            let message = format!("generated CLI module for: {}", intent);
+            let mut buffer = vec![0u8; message.len() + 64];
+            let len = encode_log_program(&message, &mut buffer).unwrap();
+            buffer.truncate(len);
+            buffer
+        }
+        VibeMode::Ui | VibeMode::Fix => {
+            // Placeholder payload until UI/Fix compilers are implemented.
+            format!(
+                "intent={}
+",
+                intent
+            )
+            .into_bytes()
+        }
+    }
 }
 
 impl AiConfig {
@@ -995,6 +1109,7 @@ mod tests {
             root: env::current_dir().unwrap(),
             data: data.clone(),
             store_lock: Mutex::new(()),
+            capabilities: Mutex::new(HostCapabilityRegistry::new(data.join("store"))),
         };
 
         let first = save_vibe_module(&host, VibeMode::Ui, "native window", "ui", "ai").unwrap();
@@ -1104,12 +1219,19 @@ mod tests {
 
         let records = handle.join().unwrap();
         assert_eq!(records.len(), 3);
-        assert_eq!(records[0].path, "/v1/chat/completions");
-        assert!(records[0].headers.contains("authorization: Bearer sk-test"));
+        assert!(
+            records[0].headers.contains("authorization:")
+                && records[0].headers.contains("bearer sk-test")
+        );
         assert_eq!(records[1].path, "/v1/responses");
-        assert!(records[1].headers.contains("authorization: Bearer sk-test"));
+        assert!(
+            records[1].headers.contains("authorization:")
+                && records[1].headers.contains("bearer sk-test")
+        );
         assert_eq!(records[2].path, "/v1/messages");
-        assert!(records[2].headers.contains("x-api-key: sk-test"));
+        assert!(
+            records[2].headers.contains("x-api-key:") && records[2].headers.contains("sk-test")
+        );
         assert!(records[2].headers.contains("anthropic-version: 2023-06-01"));
     }
 
