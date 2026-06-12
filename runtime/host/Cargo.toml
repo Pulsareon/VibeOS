@@ -1,0 +1,14 @@
+[package]
+name = "vibeos-host"
+version = "0.1.0"
+edition = "2024"
+description = "Dependency-free Rust host for VibeOS web, desktop and virtual machines"
+
+[[bin]]
+name = "vibeos-host"
+path = "src/main.rs"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde_json = "1"
+vibeos-core = { path = "../core" }

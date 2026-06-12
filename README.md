@@ -2,163 +2,117 @@
 
 > **Device + AI = OS**
 
-VibeOS 是一种 AI 原生操作系统。
+VibeOS 是一个以 AI 为核心、完全模块化的 Rust 操作系统实验。
 
-它不是“带有 AI 助手的传统操作系统”，而是尝试让 AI 成为系统的核心：用户只需要表达意图，AI 就能基于设备能力实时构建功能、生成界面、理解当前状态，并持续与用户协作。
+它的最终目标不是在 Linux 上运行一个桌面，也不是为传统系统增加 AI 助手。VibeOS 应由设备固件直接启动，系统核心、模块协议、设备适配和能力运行时都使用 Rust 实现。
 
-在 VibeOS 中，没有必须预先安装的应用，也没有永远固定的界面。每次解决问题时生成的功能都可以永久保存在本地，之后随时复用、修改和继续演化。
+系统只保留三个基本能力：
 
-## 核心愿景
+| 能力 | 作用 |
+| --- | --- |
+| **CLI Vibe** | 通过命令行创建命令、自动化和低资源设备能力 |
+| **UI Vibe** | 根据意图生成或修改界面 |
+| **Vibe 改 Bug** | 分析当前能力和错误，生成新版本并支持回滚 |
 
-传统操作系统的基本模型是：
+其他所有功能都应作为 Vibe Module 按需生成、动态加载并永久保存在本地，而不是成为预装系统组件。
 
-```text
-设备 -> 操作系统 -> 已安装应用 -> 固定界面 -> 用户操作
-```
+## 设计边界
 
-VibeOS 希望将它变为：
+### Rust Only
 
-```text
-设备 -> AI -> 根据意图生成能力和界面 -> 本地永久保存 -> 持续演化
-```
+- 系统核心只使用 Rust。
+- 单片机核心使用 `#![no_std]`，不需要操作系统、堆分配或标准库。
+- 电脑裸机目标使用 Rust UEFI 程序，由固件直接启动，不经过 Linux。
+- 最终插件运行时和设备驱动使用 Rust 与稳定的 Vibe Module ABI。
 
-这里的“不依赖任何东西”并不是指系统不需要代码，而是指它不依赖传统应用生态、固定业务界面或云端服务。VibeOS 的最小闭环只有：
+网页宿主只使用声明式 HTML/CSS 展示输入和结果，所有请求处理、模式映射和系统逻辑均由 Rust Host 执行。仓库不再包含 JavaScript 或 Python 可执行逻辑。
 
-- 一台具备计算、存储和输入输出能力的设备
-- 一个可以理解、规划和生成能力的 AI
-- 一个负责执行、隔离和保存结果的最小运行时
+### 足够小
 
-## 核心原则
+当前构建结果参考：
 
-### AI 就是系统核心
+- `vibeos-core`：`no_std`、固定缓冲区、无堆分配
+- 独立 UEFI 启动目标：约 **2.5 KiB**
+- 桌面/网页 Rust Host：约 **193 KiB**
 
-AI 不只是被动接收聊天消息。它需要持续理解当前界面、系统状态、用户操作和设备能力，并决定下一步应该展示什么、执行什么或生成什么。
+同一核心可用于资源很小的单片机，也可以由完整设备宿主提供显示、存储、网络和本地 AI。
 
-### 界面是实时生成的
+### 不依赖 Linux
 
-界面不再是应用提前写死的页面，而是 AI 根据当前目标、上下文和设备形态实时生成的交互方式。同一个功能可以根据场景变成窗口、表格、画布、终端或语音交互。
+`platform/uefi` 是独立裸机目标。它编译为 `BOOTX64.EFI`，可由 UEFI 电脑或虚拟机直接启动。
 
-### 功能按需产生
+Linux、macOS、Windows、Android、iOS 和网页是兼容宿主或开发平台，不是 VibeOS 的底层。Linux 容器仅用于方便体验 Rust Host，不用于构建最终 VibeOS 系统镜像。
 
-用户不需要寻找和安装应用。用户只需要描述目标，例如：
-
-```text
-帮我做一个可以记录每日开销并生成趋势图的工具
-```
-
-AI 负责理解需求、生成能力与界面、运行结果，并在后续使用中继续修改。
-
-### 本地优先，永久沉淀
-
-AI 曾经生成并验证过的功能不应在对话结束后消失。它们会作为本地能力被保存，包括：
-
-- 功能代码与界面定义
-- 数据、配置与运行状态
-- 用户对功能的修改和偏好
-- 版本历史与能力描述
-- 可被 AI 再次理解和组合的元数据
-
-这些能力之后可以离线使用，也可以成为 AI 构建新功能时的基础模块。
-
-### 系统可以持续演化
-
-传统应用通过版本更新改变；VibeOS 中的能力可以在使用过程中被 AI 持续调整。用户可以直接说：
+## 核心架构
 
 ```text
-把这个界面改得更简单
-增加导出功能
-以后打开时默认显示本月数据
+设备 / 固件
+    |
+Rust Device Adapter
+    |
+VibeOS no_std Core
+    |
+CLI Vibe | UI Vibe | Vibe Fix
+    |
+Vibe Module Registry
+    |
+本地版本 / 动态加载 / 回滚
 ```
 
-修改后的能力会作为新的本地版本保存。
+### Vibe Module
 
-## 目标运行闭环
+所有生成能力都使用统一模块包：
 
 ```text
-用户意图
-   |
-   v
-AI 理解当前界面、上下文和设备能力
-   |
-   v
-规划并生成能力、界面与交互逻辑
-   |
-   v
-最小运行时安全执行
-   |
-   v
-界面状态与用户操作实时反馈给 AI
-   |
-   v
-AI 调整结果并将可复用能力永久保存到本地
+Magic: VPK1
+ABI Version
+Vibe Mode: CLI / UI / Fix
+Module Format: Native Binary / Portable UI / WebAssembly / Vibe Bytecode
+Module Target: Portable / UEFI / Bare Metal / Android / iOS / macOS / Linux / Web
+Semantic Version: major.minor.patch
+Module ID
+Module Payload
 ```
 
-## 目标架构
+Rust Core 已提供：
 
-### 1. Device Layer
+- 固定容量模块注册表
+- 模块包解析和 ABI 校验
+- 语义化版本管理
+- 产物格式与目标平台声明
+- 动态加载器抽象
+- 自动选择最新启用版本
+- 卸载与版本回滚
 
-向上提供统一的设备能力，例如文件、网络、摄像头、麦克风、显示、传感器和计算资源。
+不同设备可以实现不同的 `ModuleLoader`：
 
-### 2. Minimal Runtime
+- 裸机或单片机：Flash 模块、紧凑字节码或受控原生模块
+- 网页和移动端：WebAssembly 沙箱模块
+- 桌面设备：Portable UI 或 Rust 原生二进制 UI 模块
 
-负责启动、执行、权限控制、沙箱隔离、状态管理和本地存储。它应尽可能小，只提供 AI 构建其他能力所需的基础。
+UI Vibe 不绑定 Web UI。AI 可以按设备能力生成 Portable UI Tree、WebAssembly UI、Vibe Bytecode UI，或针对目标架构编译的 Rust Native Binary UI。原生模块作为独立能力运行，通过稳定 Vibe 消息协议与原生合成器通信。
 
-### 3. AI Kernel
+Rust 不保证动态库 ABI 稳定，因此 VibeOS 不直接把任意 Rust 动态库当作插件 ABI。插件通过稳定的 Vibe Module 包和平台加载器运行。
 
-理解用户意图和系统状态，规划任务，生成或组合能力，并决定界面的实时呈现方式。
+## 平台状态
 
-### 4. Living UI
+| 平台 | 当前方式 | 状态 |
+| --- | --- | --- |
+| x86_64 UEFI 电脑 | 固件直接启动 `BOOTX64.EFI` | 已可构建和启动最小 Vibe CLI |
+| QEMU / UEFI 虚拟机 | 启动 `dist/EFI/BOOT/BOOTX64.EFI` | 已可构建 |
+| 单片机 | `vibeos-core` + 芯片 Transport/Store/Vibe 适配 | Core 已实现，芯片适配待添加 |
+| Windows / Linux / macOS | `vibeos-host` Rust 二进制 | Host 已实现 |
+| 网页 | Rust Host + 声明式 HTML/CSS | 已可运行 |
+| Android / iOS | 浏览器入口；原生 Rust 宿主待添加 | 响应式入口已可运行 |
 
-一个可被 AI 读取、修改和重组的界面系统。所有可见组件、交互事件和状态变化都应能以结构化方式反馈给 AI。
+## 快速运行
 
-### 5. Local Capability Store
+### 电脑、手机和网页宿主
 
-永久保存 AI 曾经生成的能力。它不是传统意义上的应用商店，而是属于用户自己的本地能力库。
-
-### 6. Safety Boundary
-
-管理设备权限、危险操作确认、生成代码隔离、数据访问范围和能力来源，保证 AI 能行动但不能越权。
-
-## 当前实现
-
-当前仓库是 VibeOS 愿景的早期浏览器概念验证，用于探索“描述即应用”和动态桌面交互。
-
-已经实现：
-
-- 原生 HTML、CSS 和 JavaScript 构建的浏览器桌面
-- 窗口创建、拖动、聚焦、最小化、最大化和关闭
-- 根据描述关键词实时拼装界面与交互逻辑
-- 生成过程动画与沙箱 `iframe` 执行
-- 将生成结果保存到浏览器 `localStorage`
-- 本地 Bug Reporter
-- 网页与 `chat/messages.jsonl` 之间的消息通道
-- 终端、记事本、画板、贪吃蛇等原型能力
-
-尚未实现：
-
-- 真正接入 AI 模型作为系统核心
-- AI 对当前界面、事件和系统状态的结构化感知
-- AI 根据反馈实时修改界面的完整闭环
-- 独立于浏览器的持久化能力仓库
-- 可靠的能力版本、依赖、组合和迁移机制
-- 完整的设备驱动、权限系统与安全边界
-- 可直接运行在设备上的独立系统运行时
-
-> 当前的 VibeEngine 是关键词驱动的本地模板生成器，不会调用外部 AI。浏览器 `localStorage` 也只是持久化能力仓库的临时原型。
-
-## 快速体验当前原型
-
-### 环境要求
-
-- Python 3
-- 现代桌面浏览器
-
-项目当前不需要安装 Python 包或前端依赖。
-
-### 启动
+构建并启动 Rust Host：
 
 ```bash
-python server.py
+cargo run --release -p vibeos-host
 ```
 
 访问：
@@ -167,77 +121,119 @@ python server.py
 http://localhost:8080
 ```
 
-不要直接双击打开 `index.html`，因为本地消息通道依赖 `/api/*` 接口。
+同一局域网内的手机可访问电脑的局域网地址。Android 和 iOS 原生设备权限桥接仍需后续以 Rust 平台适配层实现。
 
-## 当前交互
+可配置环境变量：
 
-- 单击左下角 `VIBE`，输入描述并生成应用
-- 按 `Ctrl/Command + Enter` 快速提交描述
-- 单击桌面右键打开快捷菜单
-- 在 500 毫秒内双击右键直接打开生成窗口
-- 使用右下角聊天窗口通过本地 JSONL 文件与外部 AI 或 Agent 通信
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `VIBE_HOST` | `0.0.0.0` | 监听地址 |
+| `VIBE_PORT` | `8080` | 监听端口 |
+| `VIBE_ROOT` | 当前目录 | Web 宿主资源目录 |
+| `VIBE_DATA_DIR` | `data/` | 本地模块持久化目录 |
 
-生成结果保存在当前浏览器站点的 `localStorage` 中，键名为 `vibeos_user_apps`。
-
-## 本地 AI 消息通道
-
-当前原型通过下面的文件让外部 AI 或 Agent 与界面通信：
+提交 `/vibe` 表单时，Rust Host 会把意图封装为 `.vpk` Vibe Module 包，并保存到：
 
 ```text
-chat/messages.jsonl
+VIBE_DATA_DIR/modules/<module-id>/<semver>.vpk
 ```
 
-每行是一条独立 JSON 消息：
+当前保存的是占位模块载荷，用于验证 ABI、版本和持久化路径。真实 AI Module Compiler 接入后，这里会保存可动态加载的 Portable UI、WebAssembly、Vibe Bytecode 或原生二进制模块。
 
-```json
-{"from":"user","text":"把当前界面改成深色","time":"12:30:00"}
-{"from":"mimo","text":"收到","time":"12:30:05"}
+### 容器或普通虚拟机宿主
+
+```bash
+docker compose up --build
 ```
 
-网页消息会追加到该文件，聊天窗口每 3 秒读取一次 `from=mimo` 的回复。
+这只是用于在现有系统或虚拟机内运行兼容宿主，不是独立 VibeOS 系统。
 
-当前 API：
+## 构建独立 VibeOS
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/api/messages` | 返回全部消息 |
-| `GET` | `/api/replies` | 返回 AI 回复 |
-| `POST` | `/api/send` | 追加一条消息 |
+安装 Rust UEFI 目标：
+
+```bash
+rustup target add x86_64-unknown-uefi
+```
+
+构建独立启动文件：
+
+```bash
+cargo run --release -p vibeos-image-builder
+```
+
+输出：
+
+```text
+dist/
+└── EFI/
+    └── BOOT/
+        └── BOOTX64.EFI
+```
+
+将 `dist/EFI` 复制到 FAT32 UEFI 启动分区，即可由支持 x86_64 UEFI 的电脑或虚拟机直接启动。当前文件未签名，通常需要关闭 Secure Boot。
+
+当前裸机目标已经脱离 Linux，但仍是最小启动阶段：它只有 Vibe CLI 入口，尚未包含完整磁盘安装器、网络、图形、AI、文件系统和硬件驱动。请先使用单独的 USB 或虚拟机测试，不要覆盖现有系统的 EFI 分区。
+
+## 单片机接入
+
+`runtime/core` 不依赖标准库。设备只需要实现三个 Rust trait：
+
+```rust
+pub trait Vibe {
+    fn create(&mut self, mode: VibeMode, intent: &[u8], output: &mut [u8])
+        -> Result<usize, Error>;
+}
+
+pub trait CapabilityStore {
+    // 从 Flash 或其他本地介质读取和保存能力
+}
+
+pub trait Transport {
+    // 串口、BLE、网络或设备内通信
+}
+```
+
+资源不足以运行本地 AI 的设备，可以通过 `Transport` 连接旁路 AI；生成并验证过的模块仍保存在设备本地，之后可脱离 AI 重复执行。
 
 ## 项目结构
 
 ```text
 vibeos/
-├── index.html            # 当前桌面结构与交互入口
-├── server.py             # 静态文件服务和本地消息 API
-├── core/
-│   ├── os.css            # 桌面、窗口和任务栏样式
-│   └── os.js             # 当前最小 OS 交互核心
-├── apps/
-│   ├── vibe-engine.js    # 当前关键词生成引擎
-│   ├── builtin.js        # 原型内置能力
-│   └── registry.js       # 能力匹配规则与本地注册表
-└── chat/
-    └── messages.jsonl    # 本地 AI 消息记录
+├── runtime/
+│   ├── core/             # no_std Rust Core、三种 Vibe、模块与版本系统
+│   └── host/             # Rust 兼容宿主与本地 API
+├── platform/
+│   └── uefi/             # 不经过 Linux 的 x86_64 UEFI 裸机目标
+├── tools/
+│   ├── image-builder/    # Rust 独立启动目录构建器
+│   └── module-inspect/   # Vibe Module 包检查工具
+├── core/os.css           # 声明式界面样式
+└── manifest.webmanifest  # Web 安装元数据
 ```
 
-## 下一阶段
-
-1. 定义 AI 可读取的统一界面树、状态树和事件协议。
-2. 将真实 AI 接入系统闭环，使其能够观察界面并主动修改界面。
-3. 将生成结果从临时页面升级为带清单、版本和数据的本地能力包。
-4. 建立权限与沙箱机制，让生成能力安全访问设备。
-5. 让 AI 优先检索和复用本地已有能力，而不是每次重新生成。
-6. 将运行时逐步从浏览器原型迁移到更接近设备层的独立环境。
-
-## 开发检查
+## 验证
 
 ```bash
-python -m py_compile server.py
-node --check core/os.js
-node --check apps/vibe-engine.js
-node --check apps/builtin.js
-node --check apps/registry.js
+cargo fmt --all -- --check
+cargo test -p vibeos-core -p vibeos-host -p vibeos-image-builder
+cargo build --release -p vibeos-host
+cargo build --release -p vibeos-module-inspect
+cargo build --release -p vibeos-uefi --target x86_64-unknown-uefi
+cargo run --release -p vibeos-image-builder
+cargo check -p vibeos-core --target wasm32-unknown-unknown
+cargo check -p vibeos-core --target aarch64-linux-android
+cargo check -p vibeos-core --target aarch64-apple-ios
+cargo check -p vibeos-core --target thumbv7em-none-eabihf
 ```
 
-VibeOS 的目标不是生成更多应用，而是让“应用”这个固定边界逐渐消失，让设备能够通过 AI 按照用户意图即时成为所需要的工具。
+## 下一步
+
+1. 定义可被 AI 生成的受控模块指令集，并实现第一个 Rust `ModuleLoader`。
+2. 为 UEFI 目标增加持久化存储、网络、图形输出和 AI Transport。
+3. 为一种真实单片机增加 Rust HAL 适配和 Flash Capability Store。
+4. 实现 Rust AI Module Compiler，输出 Portable UI、WASM 和原生二进制 UI。
+5. 为 Android、iOS、macOS 和 Linux 增加最薄的 Rust 设备权限适配层。
+6. 实现独立磁盘安装器、升级和双版本回滚。
+
+VibeOS 的目标不是预装更多功能，而是让设备只有 Vibe，并让一切能力都可以被生成、保存、加载、升级和修复。

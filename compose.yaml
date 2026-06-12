@@ -1,0 +1,11 @@
+services:
+  vibeos:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - vibeos-data:/data
+    restart: unless-stopped
+
+volumes:
+  vibeos-data:

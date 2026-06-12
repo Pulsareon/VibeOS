@@ -1,0 +1,14 @@
+[package]
+name = "vibeos-uefi"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone Rust-only UEFI boot target for VibeOS"
+
+[[bin]]
+name = "vibeos-uefi"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+vibeos-core = { path = "../../runtime/core" }

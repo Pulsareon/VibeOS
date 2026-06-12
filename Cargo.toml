@@ -1,0 +1,22 @@
+[workspace]
+members = [
+  "runtime/core",
+  "runtime/host",
+  "platform/uefi",
+  "tools/image-builder",
+  "tools/module-inspect"
+]
+resolver = "2"
+default-members = [
+  "runtime/core",
+  "runtime/host",
+  "tools/image-builder",
+  "tools/module-inspect"
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

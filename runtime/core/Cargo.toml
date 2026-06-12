@@ -1,0 +1,8 @@
+[package]
+name = "vibeos-core"
+version = "0.1.0"
+edition = "2024"
+description = "Tiny no_std VibeOS runtime for devices and microcontrollers"
+
+[lib]
+path = "src/lib.rs"

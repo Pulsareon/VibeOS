@@ -1,0 +1,12 @@
+[package]
+name = "vibeos-module-inspect"
+version = "0.1.0"
+edition = "2024"
+description = "Inspect VibeOS module packages"
+
+[[bin]]
+name = "vibeos-module-inspect"
+path = "src/main.rs"
+
+[dependencies]
+vibeos-core = { path = "../../runtime/core" }

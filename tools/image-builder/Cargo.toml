@@ -1,0 +1,9 @@
+[package]
+name = "vibeos-image-builder"
+version = "0.1.0"
+edition = "2024"
+description = "Rust-only build orchestrator for the installable VibeOS system image"
+
+[[bin]]
+name = "vibeos-image-builder"
+path = "src/main.rs"
