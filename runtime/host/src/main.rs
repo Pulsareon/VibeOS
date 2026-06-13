@@ -442,25 +442,25 @@ fn vibe_response(stream: &mut TcpStream, host: &Host, body: &[u8]) -> std::io::R
         Err(error) => error.as_str(),
     };
     let saved = save_vibe_module(host, vibe_mode, intent.trim(), output_kind, ai_text)?;
-    let execution = if vibe_mode == VibeMode::Cli {
-        match execute_saved_module(host, &saved.path) {
-            Ok(output) => format!(
-                "
+    let execution = match execute_saved_module(host, &saved.path) {
+        Ok(output) => format!(
+            "
 执行结果：{}",
-                String::from_utf8_lossy(&output)
-            ),
-            Err(error) => format!(
-                "
+            String::from_utf8_lossy(&output)
+        ),
+        Err(error) => format!(
+            "
 执行失败：{error}"
-            ),
+        ),
+    };
+    let ai_status = match &ai_result {
+        Ok(_) => "AI 已生成模块载荷".to_owned(),
+        Err(error) if error == "AI endpoint not configured" => {
+            "AI 未配置，已保存离线占位模块".to_owned()
         }
-    } else {
-        String::new()
+        Err(error) => format!("AI 调用失败：{error}"),
     };
-    let ai_status = match ai_result {
-        Ok(_) => "AI 已生成模块载荷",
-        Err(_) => "AI 未连接，已保存离线占位模块",
-    };
+    let ai_text_for_display = ai_text.replace('\0', "");
     let body = format!(
         "<main class=\"vibe-shell\"><div class=\"brand-mark\">V</div><section class=\"result\"><h2>{mode_name}</h2><p>意图已由 Rust Host 接收，并被映射为 VibeMode::{vibe_mode:?}。</p><code>{intent}</code><p>目标产物：{output_kind}</p><p>{ai_status}</p><code>{ai_text}</code><p>已保存为本地 Vibe Module：</p><code>ID: {id}
 Version: {major}.{minor}.{patch}
@@ -469,7 +469,7 @@ Path: {path}{execution}</code><a class=\"back-link\" href=\"/desktop\">返回桌
         intent = html_escape(intent.trim()),
         output_kind = html_escape(output_kind),
         ai_status = ai_status,
-        ai_text = html_escape(ai_text),
+        ai_text = html_escape(&ai_text_for_display),
         id = html_escape(&saved.id),
         major = saved.version.major,
         minor = saved.version.minor,
@@ -594,47 +594,60 @@ fn module_shape(mode: VibeMode) -> (ModuleFormat, ModuleTarget) {
     }
 }
 
-fn module_capabilities(mode: VibeMode) -> Vec<u8> {
-    match mode {
-        VibeMode::Cli => {
-            let req = CapabilityRequirement {
-                id: CapabilityId::from_str("sys:log").unwrap(),
-                min_version: CapabilityVersion::new(1, 0),
-            };
-            let mut buffer = vec![0u8; 64];
-            let len = req.encode(&mut buffer).unwrap();
-            buffer.truncate(len);
-            buffer
-        }
-        VibeMode::Ui | VibeMode::Fix => Vec::new(),
-    }
+fn module_capabilities(_mode: VibeMode) -> Vec<u8> {
+    let req = CapabilityRequirement {
+        id: CapabilityId::from_str("sys:log").unwrap(),
+        min_version: CapabilityVersion::new(1, 0),
+    };
+    let mut buffer = vec![0u8; 64];
+    let len = req.encode(&mut buffer).unwrap();
+    buffer.truncate(len);
+    buffer
 }
 
 fn module_payload(
     mode: VibeMode,
     intent: &str,
     _output_kind: &str,
-    _ai_text: &str,
+    ai_text: &str,
     _version: Version,
 ) -> Vec<u8> {
     match mode {
         VibeMode::Cli => {
-            let message = format!("generated CLI module for: {}", intent);
+            let message = if ai_text.trim().is_empty() {
+                format!("generated CLI module for: {}", intent)
+            } else {
+                ai_text.trim().chars().take(120).collect()
+            };
             let mut buffer = vec![0u8; message.len() + 64];
             let len = encode_log_program(&message, &mut buffer).unwrap();
             buffer.truncate(len);
             buffer
         }
         VibeMode::Ui | VibeMode::Fix => {
-            // Placeholder payload until UI/Fix compilers are implemented.
-            format!(
-                "intent={}
-",
-                intent
-            )
-            .into_bytes()
+            let source = ai_text.trim();
+            if source.contains("vibe_module_main") {
+                source.as_bytes().to_vec()
+            } else {
+                default_native_source(intent).into_bytes()
+            }
         }
     }
+}
+
+fn default_native_source(intent: &str) -> String {
+    let safe_intent = intent.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "use vibeos_core::c_abi::{{VibeAbi, VIBE_MODULE_OK}};\n\n\
+         #[unsafe(no_mangle)]\n\
+         pub unsafe extern \"C\" fn vibe_module_main(abi: *const VibeAbi) -> i32 {{\n\
+             let abi = unsafe {{ &*abi }};\n\
+             let msg = b\"VibeOS module for: {}\\0\";\n\
+             unsafe {{ (abi.log)(abi.context, msg.as_ptr(), msg.len() - 1) }};\n\
+             VIBE_MODULE_OK\n\
+         }}\n",
+        safe_intent
+    )
 }
 
 impl AiConfig {
@@ -651,25 +664,42 @@ fn ai_config_path(host: &Host) -> PathBuf {
 
 fn load_ai_config(host: &Host) -> std::io::Result<Option<AiConfig>> {
     let path = ai_config_path(host);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(path)?;
     let mut config = AiConfig::default();
-    for line in content.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = unescape_config(value);
-        match key {
-            "protocol" => config.protocol = AiProtocol::from_str(&value),
-            "base_url" => config.base_url = value,
-            "model" => config.model = value,
-            "api_key" => config.api_key = value,
-            _ => {}
+    let mut any = false;
+    if path.exists() {
+        any = true;
+        let content = fs::read_to_string(path)?;
+        for line in content.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = unescape_config(value);
+            match key {
+                "protocol" => config.protocol = AiProtocol::from_str(&value),
+                "base_url" => config.base_url = value,
+                "model" => config.model = value,
+                "api_key" => config.api_key = value,
+                _ => {}
+            }
         }
     }
-    Ok(Some(config))
+    if let Ok(protocol) = env::var("VIBE_AI_PROTOCOL") {
+        any = true;
+        config.protocol = AiProtocol::from_str(&protocol);
+    }
+    if let Ok(base_url) = env::var("VIBE_AI_BASE_URL") {
+        any = true;
+        config.base_url = base_url;
+    }
+    if let Ok(model) = env::var("VIBE_AI_MODEL") {
+        any = true;
+        config.model = model;
+    }
+    if let Ok(api_key) = env::var("VIBE_AI_API_KEY") {
+        any = true;
+        config.api_key = api_key;
+    }
+    if any { Ok(Some(config)) } else { Ok(None) }
 }
 
 fn save_ai_config(host: &Host, config: &AiConfig) -> std::io::Result<()> {
@@ -732,10 +762,34 @@ fn endpoint_url(base_url: &str, endpoint: &str) -> String {
 }
 
 fn call_ai(config: &AiConfig, mode: VibeMode, intent: &str) -> Result<String, String> {
-    let prompt = format!(
-        "You are the VibeOS AI Module Compiler. Return a compact module payload plan. Mode: {:?}. Intent: {}. Include module kind, inputs, UI or CLI behavior, and fix strategy if relevant. Do not include secrets.",
-        mode, intent
-    );
+    let prompt = match mode {
+        VibeMode::Cli => format!(
+            "You are the VibeOS CLI module compiler. The user intent is: {}. Respond with a single short sentence (max 120 chars, plain text, no quotes) that the module will log. Do not explain.",
+            intent
+        ),
+        VibeMode::Ui => format!(
+            "You are the VibeOS Native UI module compiler. The user intent is: {}.\n\
+             Generate a minimal Rust native VibeOS module as plain source code.\n\
+             Requirements:\n\
+             1. Start with `use vibeos_core::c_abi::{{VibeAbi, VIBE_MODULE_OK}};`\n\
+             2. Define `#[unsafe(no_mangle)] pub unsafe extern \"C\" fn vibe_module_main(abi: *const VibeAbi) -> i32`\n\
+             3. Log a short message describing the UI using `(abi.log)(abi.context, msg.as_ptr(), msg.len() - 1)`\n\
+             4. Return VIBE_MODULE_OK\n\
+             Return ONLY the Rust source code, no markdown, no explanation.",
+            intent
+        ),
+        VibeMode::Fix => format!(
+            "You are the VibeOS Fix module compiler. The user intent is: {}.\n\
+             Generate a minimal Rust native VibeOS module as plain source code.\n\
+             Requirements:\n\
+             1. Start with `use vibeos_core::c_abi::{{VibeAbi, VIBE_MODULE_OK}};`\n\
+             2. Define `#[unsafe(no_mangle)] pub unsafe extern \"C\" fn vibe_module_main(abi: *const VibeAbi) -> i32`\n\
+             3. Log a short message describing the fix using `(abi.log)(abi.context, msg.as_ptr(), msg.len() - 1)`\n\
+             4. Return VIBE_MODULE_OK\n\
+             Return ONLY the Rust source code, no markdown, no explanation.",
+            intent
+        ),
+    };
     match config.protocol {
         AiProtocol::OpenAiChat => call_openai_chat(config, &prompt),
         AiProtocol::OpenAiResponses => call_openai_responses(config, &prompt),
