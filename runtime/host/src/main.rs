@@ -226,37 +226,62 @@ fn desktop_response(stream: &mut TcpStream) -> std::io::Result<()> {
     let page = html_page(
         "VibeOS Desktop",
         "desktop-body",
-        r#"
-<main class="desktop">
-  <section class="status-bar">
-    <div class="brand-pill">VibeOS</div>
-    <div class="status-right"><a href="/tty">TTY</a><a href="/config">AI Config</a><span>Rust Core</span><span>Local Modules</span></div>
-  </section>
-  <section class="desktop-grid">
-    <article class="vibe-window">
-      <header><span>⚡ UI Vibe</span><a href="/tty">切换到 TTY</a></header>
-      <form class="vibe-form compact" method="post" action="/vibe">
-        <input type="hidden" name="mode" value="ui">
-        <textarea name="intent" rows="6" required autofocus placeholder="描述要生成的原生窗口、手机界面或系统面板"></textarea>
-        <button class="vibe-submit" type="submit">生成 UI 模块</button>
-      </form>
-    </article>
-    <aside class="launcher">
-      <form method="post" action="/vibe"><input type="hidden" name="mode" value="cli"><input type="hidden" name="intent" value="open tty command vibe"><button type="submit">CLI Vibe</button></form>
-      <form method="post" action="/vibe"><input type="hidden" name="mode" value="ui"><input type="hidden" name="intent" value="create native dashboard"><button type="submit">UI Vibe</button></form>
-      <form method="post" action="/vibe"><input type="hidden" name="mode" value="fix"><input type="hidden" name="intent" value="fix last broken module"><button type="submit">改 Bug</button></form>
-      <a class="launcher-link" href="/tty">TTY</a>
-      <a class="launcher-link" href="/config">AI</a>
+        r##"
+<main class="vibe-desktop" data-vibeos-desktop>
+  <section class="desktop-wallpaper" data-wallpaper>
+    <header class="topbar">
+      <button class="launcher-button" type="button" data-action="launcher" aria-label="Launcher">
+        <img src="/assets/vibeos.svg" alt="">
+        <span>VibeOS</span>
+      </button>
+      <label class="command-center" aria-label="Search">
+        <span>Search</span>
+        <input data-search-apps autocomplete="off" spellcheck="false" placeholder="Apps, files, commands">
+      </label>
+      <nav class="status-cluster" aria-label="Status">
+        <button type="button" data-action="notifications">AI</button>
+        <button type="button" data-action="quick-settings">NET</button>
+        <time data-clock>--:--</time>
+      </nav>
+    </header>
+
+    <section class="desktop-stage" data-desktop-stage aria-label="Desktop">
+      <div class="desktop-icon-grid" data-desktop-icons></div>
+      <div class="window-layer" data-window-layer></div>
+    </section>
+
+    <aside class="launcher-panel" data-launcher hidden>
+      <header>
+        <strong>Start</strong>
+        <input data-launcher-search autocomplete="off" spellcheck="false" placeholder="Search">
+      </header>
+      <div class="launcher-apps" data-launcher-apps></div>
     </aside>
+
+    <aside class="quick-panel" data-quick-panel hidden>
+      <header><strong>Control Center</strong><span data-quick-clock>--:--</span></header>
+      <div class="quick-grid">
+        <button type="button" data-toggle-class="is-focus">Focus</button>
+        <button type="button" data-toggle-class="is-muted">Mute</button>
+        <button type="button" data-toggle-class="is-compact">Compact</button>
+        <button type="button" data-action="cycle-wallpaper">Wallpaper</button>
+      </div>
+      <a href="/config">AI endpoint</a>
+      <a href="/api/health">Health</a>
+    </aside>
+
+    <aside class="notification-panel" data-notification-panel hidden>
+      <header><strong>Notifications</strong><button type="button" data-action="clear-notifications">Clear</button></header>
+      <div data-notifications></div>
+    </aside>
+
+    <nav class="dock" data-dock aria-label="Dock"></nav>
+
+    <menu class="context-menu" data-context-menu hidden></menu>
+    <div class="toast-stack" data-toasts></div>
   </section>
-  <nav class="dock">
-    <a href="/desktop">桌面</a>
-    <a href="/tty">TTY</a>
-    <a href="/config">AI</a>
-    <a href="/api/health">Health</a>
-  </nav>
 </main>
-"#,
+"##,
     );
     respond(
         stream,
@@ -405,7 +430,7 @@ fn save_config_response(stream: &mut TcpStream, host: &Host, body: &[u8]) -> std
 
 fn html_page(title: &str, body_class: &str, body: &str) -> String {
     format!(
-        "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\"><meta name=\"theme-color\" content=\"#080816\"><title>{}</title><link rel=\"manifest\" href=\"/manifest.webmanifest\"><link rel=\"icon\" href=\"/assets/vibeos.svg\" type=\"image/svg+xml\"><link rel=\"stylesheet\" href=\"/core/os.css\"></head><body class=\"{}\">{}</body></html>",
+        "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\"><meta name=\"theme-color\" content=\"#171a21\"><title>{}</title><link rel=\"manifest\" href=\"/manifest.webmanifest\"><link rel=\"icon\" href=\"/assets/vibeos.svg\" type=\"image/svg+xml\"><link rel=\"stylesheet\" href=\"/core/os.css\"></head><body class=\"{}\">{}<script src=\"/core/os.js\" defer></script></body></html>",
         html_escape(title),
         body_class,
         body
@@ -999,6 +1024,7 @@ fn static_file(path: &str) -> Option<&'static str> {
     match path {
         "/manifest.webmanifest" => Some("manifest.webmanifest"),
         "/core/os.css" => Some("core/os.css"),
+        "/core/os.js" => Some("core/os.js"),
         "/assets/vibeos.svg" => Some("assets/vibeos.svg"),
         _ if path.contains("..") => Some("../forbidden"),
         _ => None,
@@ -1116,6 +1142,7 @@ fn mime_type(path: &Path) -> &'static str {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("html") => "text/html; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
         Some("json") | Some("webmanifest") => "application/json; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("wasm") => "application/wasm",
@@ -1148,6 +1175,7 @@ mod tests {
     fn exposes_only_vibe_static_files() {
         assert_eq!(static_file("/"), None);
         assert_eq!(static_file("/core/os.css"), Some("core/os.css"));
+        assert_eq!(static_file("/core/os.js"), Some("core/os.js"));
         assert_eq!(static_file("/Cargo.toml"), None);
         assert_eq!(static_file("/../Cargo.toml"), Some("../forbidden"));
     }
