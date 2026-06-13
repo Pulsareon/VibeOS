@@ -15,20 +15,21 @@ use vibeos_core::{OP_VIBE_CLI, OP_VIBE_FIX, OP_VIBE_UI, VibeMode};
 
 mod c_abi;
 mod capability;
+mod chat;
 mod display;
 mod native_loader;
 
 const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
-struct Host {
-    root: PathBuf,
-    data: PathBuf,
+pub struct Host {
+    pub root: PathBuf,
+    pub data: PathBuf,
     store_lock: Mutex<()>,
-    capabilities: Mutex<HostCapabilityRegistry>,
+    pub capabilities: Mutex<HostCapabilityRegistry>,
     started: Instant,
 }
 
-struct SavedModule {
+pub struct SavedModule {
     id: String,
     version: Version,
     path: PathBuf,
@@ -36,15 +37,15 @@ struct SavedModule {
 }
 
 #[derive(Clone, Debug, Default)]
-struct AiConfig {
-    protocol: AiProtocol,
-    base_url: String,
-    model: String,
-    api_key: String,
+pub struct AiConfig {
+    pub protocol: AiProtocol,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AiProtocol {
+pub enum AiProtocol {
     OpenAiChat,
     OpenAiResponses,
     ClaudeMessages,
@@ -79,8 +80,6 @@ fn main() -> std::io::Result<()> {
         return healthcheck();
     }
 
-    display::start_display_thread();
-
     let root = env::var("VIBE_ROOT")
         .map(PathBuf::from)
         .unwrap_or(env::current_dir()?);
@@ -94,6 +93,7 @@ fn main() -> std::io::Result<()> {
     );
 
     fs::create_dir_all(&data)?;
+    display::start_display_thread();
     let capabilities = HostCapabilityRegistry::new(data.join("store"));
     let host = Arc::new(Host {
         root: root.canonicalize()?,
@@ -124,19 +124,25 @@ fn main() -> std::io::Result<()> {
 }
 
 fn healthcheck() -> std::io::Result<()> {
+    use std::io::BufRead;
+
     let address = format!(
         "127.0.0.1:{}",
         env::var("VIBE_PORT").unwrap_or_else(|_| "8080".into())
     );
     let mut stream = TcpStream::connect(address)?;
-    stream
-        .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
-    let mut response = [0u8; 32];
-    let read = stream.read(&mut response)?;
-    if response[..read].starts_with(b"HTTP/1.1 200") {
+    stream.write_all(
+        b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    let mut reader = std::io::BufReader::new(&mut stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    if line.starts_with("HTTP/1.1 200") || line.starts_with("HTTP/1.0 200") {
         Ok(())
     } else {
-        Err(std::io::Error::other("VibeOS host is unhealthy"))
+        Err(std::io::Error::other(format!(
+            "VibeOS host is unhealthy: {line}"
+        )))
     }
 }
 
@@ -212,6 +218,14 @@ fn handle_connection(mut stream: TcpStream, host: &Host) -> std::io::Result<()> 
         ("GET", "/config") => config_response(&mut stream, host),
         ("POST", "/config") => save_config_response(&mut stream, host, body),
         ("POST", "/vibe") => vibe_response(&mut stream, host, body),
+        ("POST", "/api/chat") => chat::handle_chat_endpoint(&mut stream, host, body),
+        ("GET", "/api/chat/history") => {
+            let sid = chat::query_param_from_str(&query, "session_id")
+                .unwrap_or_else(|| "default".into());
+            let session = chat::load_session(&host.data, &sid);
+            let json = serde_json::to_string(&session).unwrap_or_else(|_| "{}".into());
+            json_response(&mut stream, 200, &json)
+        }
         ("OPTIONS", _) => respond(
             &mut stream,
             204,
@@ -756,7 +770,7 @@ Path: {path}{execution}</code><a class=\"back-link\" href=\"/desktop\">返回桌
     )
 }
 
-fn execute_saved_module(host: &Host, path: &Path) -> std::io::Result<Vec<u8>> {
+pub fn execute_saved_module(host: &Host, path: &Path) -> std::io::Result<Vec<u8>> {
     let bytes = fs::read(path)?;
     let package = ModulePackage::decode(&bytes)
         .map_err(|error| std::io::Error::other(format!("decode failed: {error:?}")))?;
@@ -808,7 +822,7 @@ fn execute_saved_module(host: &Host, path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(output)
 }
 
-fn save_vibe_module(
+pub fn save_vibe_module(
     host: &Host,
     mode: VibeMode,
     intent: &str,
@@ -926,7 +940,7 @@ fn default_native_source(intent: &str) -> String {
 }
 
 impl AiConfig {
-    fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         !self.base_url.trim().is_empty()
             && !self.model.trim().is_empty()
             && !self.api_key.trim().is_empty()
@@ -937,7 +951,7 @@ fn ai_config_path(host: &Host) -> PathBuf {
     host.data.join("ai.conf")
 }
 
-fn load_ai_config(host: &Host) -> std::io::Result<Option<AiConfig>> {
+pub fn load_ai_config(host: &Host) -> std::io::Result<Option<AiConfig>> {
     let path = ai_config_path(host);
     let mut config = AiConfig::default();
     let mut any = false;
@@ -1015,15 +1029,15 @@ fn unescape_config(value: &str) -> String {
     output
 }
 
-fn chat_completions_url(base_url: &str) -> String {
+pub fn chat_completions_url(base_url: &str) -> String {
     endpoint_url(base_url, "chat/completions")
 }
 
-fn responses_url(base_url: &str) -> String {
+pub fn responses_url(base_url: &str) -> String {
     endpoint_url(base_url, "responses")
 }
 
-fn claude_messages_url(base_url: &str) -> String {
+pub fn claude_messages_url(base_url: &str) -> String {
     endpoint_url(base_url, "messages")
 }
 
@@ -1333,7 +1347,7 @@ fn json_response(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Re
     )
 }
 
-fn form_field(input: &str, key: &str) -> Option<String> {
+pub fn form_field(input: &str, key: &str) -> Option<String> {
     input.split('&').find_map(|part| {
         let (name, value) = part.split_once('=')?;
         (percent_decode(name) == key).then(|| percent_decode(value))

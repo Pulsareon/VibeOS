@@ -480,41 +480,64 @@
   }
 
   function renderVibe() {
-    return `
-      <form class="vibe-app" method="post" action="/vibe" data-vibe-form>
-        <div class="segmented">
-          <label><input type="radio" name="mode" value="ui" checked><span>UI App</span></label>
-          <label><input type="radio" name="mode" value="cli"><span>Command</span></label>
-          <label><input type="radio" name="mode" value="fix"><span>Fix</span></label>
-        </div>
-        <textarea name="intent" required placeholder="Create a file manager with right-click rename and delete"></textarea>
-        <div class="suggestion-row">
-          <button type="button" data-prompt="Create a calendar app with month view, events, reminders, and right-click edit">Calendar</button>
-          <button type="button" data-prompt="Create a music player with playlists, search, queue, and volume controls">Music</button>
-          <button type="button" data-prompt="Create a screenshot tool with crop, annotate, save, and copy">Screenshot</button>
-          <button type="button" data-prompt="Fix the last generated module and keep its app icon, state, and shortcuts">Repair</button>
-        </div>
-        <footer>
-          <a href="/config">Endpoint</a>
-          <button class="primary" type="submit">Generate</button>
-        </footer>
-      </form>`;
+    return `<div class="chat-app">
+      <div class="chat-messages" data-chat-messages></div>
+      <form class="chat-input" data-chat-form>
+        <textarea name="message" required rows="2" placeholder="Tell the AI what to build, fix, or improve..." data-chat-text></textarea>
+        <button class="primary" type="submit">Send</button>
+      </form>
+    </div>`;
   }
 
   function bindVibe(win) {
-    $$("[data-prompt]", win).forEach((button) => {
-      button.addEventListener("click", () => {
-        const textarea = $("textarea", win);
-        textarea.value = button.dataset.prompt;
-        textarea.focus();
-        if (button.textContent === "Repair") $("input[value='fix']", win).checked = true;
+    const messages = $("[data-chat-messages]", win);
+    const form = $("[data-chat-form]", win);
+    const textarea = $("[data-chat-text]", win);
+    const sessionId = "desktop-" + Date.now().toString(36);
+
+    const appendMessage = (role, content, extra) => {
+      const div = document.createElement("div");
+      div.className = `chat-msg chat-${role}`;
+      let html = `<div class="chat-bubble">${escapeHtml(content).replace(/\n/g, "<br>")}</div>`;
+      if (extra?.code) {
+        html += `<pre class="chat-code"><code>${escapeHtml(extra.code)}</code></pre>`;
+      }
+      if (extra?.execution) {
+        html += `<div class="chat-exec">${escapeHtml(extra.execution)}</div>`;
+      }
+      div.innerHTML = html;
+      messages.append(div);
+      messages.scrollTop = messages.scrollHeight;
+    };
+
+    appendMessage("system", "AI Agent ready. I can generate Rust modules, fix code, and improve your OS. Just tell me what you want.");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = textarea.value.trim();
+      if (!text) return;
+      textarea.value = "";
+      appendMessage("user", text);
+      appendMessage("system", "Thinking...");
+
+      const data = await api("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `message=${encodeURIComponent(text)}&session_id=${encodeURIComponent(sessionId)}`,
       });
-    });
-    $("[data-vibe-form]", win).addEventListener("submit", (e) => {
-      const intent = $("textarea", win).value.trim();
-      if (intent) {
-        localStorage.setItem("vibe.lastIntent", intent);
-        notify("Vibe request sent");
+
+      const thinking = messages.querySelector(".chat-system:last-child");
+      if (thinking && thinking.textContent.includes("Thinking")) thinking.remove();
+
+      if (data?.messages) {
+        const last = data.messages.filter((m) => m.role === "assistant").pop();
+        if (last) {
+          appendMessage("assistant", last.content, { code: last.code, execution: last.execution });
+        }
+      } else if (data?.error) {
+        appendMessage("system", `Error: ${data.error}`);
+      } else {
+        appendMessage("system", "No response from AI");
       }
     });
   }

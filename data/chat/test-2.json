@@ -1,0 +1,17 @@
+{
+  "session_id": "test-2",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Say hello in one sentence",
+      "code": null,
+      "execution": null
+    },
+    {
+      "role": "assistant",
+      "content": "Hello! I'm VibeOS AI Agent, ready to control and improve your Rust modular OS in real-time.",
+      "code": null,
+      "execution": null
+    }
+  ]
+}

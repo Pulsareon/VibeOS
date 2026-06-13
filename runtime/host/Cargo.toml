@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vibeos-core = { path = "../core" }
 libloading = "0.8"

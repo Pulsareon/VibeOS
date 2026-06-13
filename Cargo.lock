@@ -1252,6 +1252,7 @@ dependencies = [
  "libloading",
  "minifb",
  "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "vibeos-core",
