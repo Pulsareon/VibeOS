@@ -29,6 +29,38 @@ pub const VIBE_MODULE_ERROR: i32 = -1;
 /// Log a message. `message` points to `len` UTF-8 bytes.
 pub type LogFn = unsafe extern "C" fn(context: *mut c_void, message: *const u8, len: usize);
 
+/// Read display size. Returns 0 on success.
+pub type DisplayGetInfoFn =
+    unsafe extern "C" fn(context: *mut c_void, width: *mut u32, height: *mut u32) -> i32;
+
+/// Present a full frame. `pixels` points to `width * height * 4` RGBA bytes.
+/// Returns 0 on success.
+pub type DisplayPresentFn =
+    unsafe extern "C" fn(context: *mut c_void, width: u32, height: u32, pixels: *const u8) -> i32;
+
+/// Poll the next input event. Returns 1 if an event was written, 0 if none,
+/// negative on error.
+pub type InputPollFn = unsafe extern "C" fn(context: *mut c_void, event: *mut InputEvent) -> i32;
+
+/// Input event reported by the host to native modules.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InputEvent {
+    pub kind: u8,
+    pub x: i32,
+    pub y: i32,
+    pub code: u32,
+}
+
+impl InputEvent {
+    pub const NONE: u8 = 0;
+    pub const KEY_DOWN: u8 = 1;
+    pub const KEY_UP: u8 = 2;
+    pub const MOUSE_MOVE: u8 = 3;
+    pub const MOUSE_DOWN: u8 = 4;
+    pub const MOUSE_UP: u8 = 5;
+}
+
 /// Read a value from the system store.
 /// `key`/`key_len` identify the value.
 /// `out`/`out_cap` receive the value; `out_len` receives the actual length.
@@ -93,6 +125,9 @@ pub struct VibeAbi {
     pub version: u32,
     pub context: *mut c_void,
     pub log: LogFn,
+    pub display_get_info: DisplayGetInfoFn,
+    pub display_present: DisplayPresentFn,
+    pub input_poll: InputPollFn,
     pub store_get: StoreGetFn,
     pub store_set: StoreSetFn,
     pub time_unix_ms: TimeUnixMsFn,
@@ -104,5 +139,5 @@ pub struct VibeAbi {
 pub type VibeModuleMain = unsafe extern "C" fn(abi: *const VibeAbi) -> i32;
 
 impl VibeAbi {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 }

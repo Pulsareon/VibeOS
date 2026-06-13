@@ -11,6 +11,8 @@ pub const SYS_LOG: &str = "sys:log";
 pub const SYS_STORE: &str = "sys:store";
 pub const SYS_TIME: &str = "sys:time";
 pub const SYS_NET: &str = "sys:net";
+pub const SYS_DISPLAY: &str = "sys:display";
+pub const SYS_INPUT: &str = "sys:input";
 
 fn id(value: &str) -> CapabilityId {
     CapabilityId::from_str(value).expect("valid capability id")
@@ -50,8 +52,6 @@ impl SysStore {
     }
 
     fn key_path(&self, key: &[u8]) -> PathBuf {
-        // Store each key as a file named by its UTF-8 key under the root.
-        // Non-UTF-8 keys are rejected.
         let name = core::str::from_utf8(key).unwrap_or("invalid");
         self.root.join(sanitize(name))
     }
@@ -178,6 +178,81 @@ impl Capability for SysNet {
     }
 }
 
+/// Host implementation of `sys:display`: expose a framebuffer.
+pub struct SysDisplay;
+
+impl Capability for SysDisplay {
+    fn id(&self) -> CapabilityId {
+        id(SYS_DISPLAY)
+    }
+
+    fn version(&self) -> CapabilityVersion {
+        version(1, 0)
+    }
+
+    fn invoke(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize, Error> {
+        if input.is_empty() {
+            return Err(Error::InvalidPacket);
+        }
+        match input[0] {
+            // get_info -> width(u32) height(u32)
+            0x01 => {
+                let mut width = 0u32;
+                let mut height = 0u32;
+                crate::display::get_info(&mut width, &mut height);
+                if output.len() < 8 {
+                    return Err(Error::BufferTooSmall);
+                }
+                output[0..4].copy_from_slice(&width.to_le_bytes());
+                output[4..8].copy_from_slice(&height.to_le_bytes());
+                Ok(8)
+            }
+            // present -> input: width(u32) height(u32) pixels(...)
+            0x02 => {
+                if input.len() < 9 {
+                    return Err(Error::InvalidPacket);
+                }
+                let width = u32::from_le_bytes(input[1..5].try_into().unwrap());
+                let height = u32::from_le_bytes(input[5..9].try_into().unwrap());
+                let pixels = &input[9..];
+                crate::display::present(width, height, pixels.as_ptr());
+                Ok(0)
+            }
+            _ => Err(Error::UnsupportedOperation),
+        }
+    }
+}
+
+/// Host implementation of `sys:input`: poll input events.
+pub struct SysInput;
+
+impl Capability for SysInput {
+    fn id(&self) -> CapabilityId {
+        id(SYS_INPUT)
+    }
+
+    fn version(&self) -> CapabilityVersion {
+        version(1, 0)
+    }
+
+    fn invoke(&mut self, _input: &[u8], output: &mut [u8]) -> Result<usize, Error> {
+        let mut event = vibeos_core::c_abi::InputEvent::default();
+        let available = crate::display::poll(&mut event);
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&event as *const vibeos_core::c_abi::InputEvent) as *const u8,
+                std::mem::size_of::<vibeos_core::c_abi::InputEvent>(),
+            )
+        };
+        if output.len() < bytes.len() + 1 {
+            return Err(Error::BufferTooSmall);
+        }
+        output[0] = if available > 0 { 1 } else { 0 };
+        output[1..1 + bytes.len()].copy_from_slice(bytes);
+        Ok(1 + bytes.len())
+    }
+}
+
 /// Host-side capability registry backed by a HashMap.
 pub struct HostCapabilityRegistry {
     capabilities: HashMap<CapabilityId, Box<dyn Capability + Send>>,
@@ -197,6 +272,12 @@ impl HostCapabilityRegistry {
 
         let net = SysNet;
         capabilities.insert(net.id(), Box::new(net));
+
+        let display = SysDisplay;
+        capabilities.insert(display.id(), Box::new(display));
+
+        let input = SysInput;
+        capabilities.insert(input.id(), Box::new(input));
 
         Self { capabilities }
     }
@@ -259,6 +340,8 @@ mod tests {
         assert!(registry.has(id(SYS_STORE), version(1, 0)));
         assert!(registry.has(id(SYS_TIME), version(1, 0)));
         assert!(registry.has(id(SYS_NET), version(1, 0)));
+        assert!(registry.has(id(SYS_DISPLAY), version(1, 0)));
+        assert!(registry.has(id(SYS_INPUT), version(1, 0)));
         assert!(!registry.has(id("sys:nope"), version(1, 0)));
     }
 }

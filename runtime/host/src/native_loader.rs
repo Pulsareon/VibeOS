@@ -1,9 +1,10 @@
+use std::ffi::c_void;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use libloading::{Library, Symbol};
-use vibeos_core::c_abi::{VIBE_MODULE_OK, VibeModuleMain};
+use vibeos_core::c_abi::{VIBE_MODULE_OK, VibeAbi, VibeModuleMain};
 use vibeos_core::module::{ModuleError, ModuleLoader, ModulePackage};
 
 /// Compiles Rust source into a `cdylib` and loads it.
@@ -11,17 +12,24 @@ pub struct NativeLoader {
     store_root: PathBuf,
     cache_dir: PathBuf,
     libraries: Vec<Library>,
+    context: *mut c_void,
 }
 
 impl NativeLoader {
     pub fn new(store_root: PathBuf, cache_dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&store_root);
         let _ = std::fs::create_dir_all(&cache_dir);
+        let context = Box::into_raw(Box::new(store_root.clone())) as *mut c_void;
         Self {
             store_root,
             cache_dir,
             libraries: Vec::new(),
+            context,
         }
+    }
+
+    fn make_abi(&self) -> VibeAbi {
+        crate::c_abi::host_abi_with_context(self.context, self.store_root.clone())
     }
 
     fn cached_path(
@@ -128,7 +136,7 @@ impl ModuleLoader for NativeLoader {
             .libraries
             .get(handle)
             .ok_or(ModuleError::InvokeFailed)?;
-        let abi = crate::c_abi::host_abi(self.store_root.clone());
+        let abi = self.make_abi();
         let result = unsafe {
             let main: Symbol<VibeModuleMain> = library
                 .get(b"vibe_module_main\0")
@@ -145,6 +153,16 @@ impl ModuleLoader for NativeLoader {
         let len = bytes.len().min(output.len());
         output[..len].copy_from_slice(&bytes[..len]);
         Ok(len)
+    }
+}
+
+impl Drop for NativeLoader {
+    fn drop(&mut self) {
+        if !self.context.is_null() {
+            unsafe {
+                let _ = Box::from_raw(self.context as *mut PathBuf);
+            }
+        }
     }
 }
 

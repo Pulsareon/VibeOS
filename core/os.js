@@ -13,6 +13,30 @@
       "'": "&#39;",
     })[char]);
 
+  async function api(path, options) {
+    try {
+      const res = await fetch(path, options);
+      return await res.json();
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  function formatBytes(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+
+  function formatUptime(secs) {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
   const nodes = {
     wallpaper: $("[data-wallpaper]", root),
     stage: $("[data-desktop-stage]", root),
@@ -41,9 +65,11 @@
     notes: localStorage.getItem("vibe.notes") || "",
     calc: "0",
     calcMemory: "",
-    terminalLines: ["VibeOS terminal ready.", "Commands: help, apps, open, health, clear."],
+    terminalLines: [],
     notifications: JSON.parse(localStorage.getItem("vibe.notifications") || "[]"),
     settings: JSON.parse(localStorage.getItem("vibe.settings") || "{}"),
+    fileBrowsePath: ".",
+    moduleList: [],
   };
 
   const appOrder = [
@@ -484,7 +510,7 @@
         if (button.textContent === "Repair") $("input[value='fix']", win).checked = true;
       });
     });
-    $("[data-vibe-form]", win).addEventListener("submit", () => {
+    $("[data-vibe-form]", win).addEventListener("submit", (e) => {
       const intent = $("textarea", win).value.trim();
       if (intent) {
         localStorage.setItem("vibe.lastIntent", intent);
@@ -494,58 +520,106 @@
   }
 
   function renderFiles() {
-    const rows = [
-      ["Desktop", "folder", "Built-in apps and generated modules"],
-      ["data/modules", "folder", "Saved VPK packages"],
-      ["ai.conf", "config", "Endpoint settings"],
-      ["core/os.js", "file", "Desktop runtime"],
-      ["core/os.css", "file", "System style"],
-      ["manifest.webmanifest", "file", "Install metadata"],
-    ];
     return `<div class="files-app">
       <aside>
-        <button class="is-active" type="button">Home</button>
-        <button type="button">Modules</button>
-        <button type="button">System</button>
-        <button type="button">Devices</button>
+        <button class="is-active" type="button" data-fs-nav=".">Home</button>
+        <button type="button" data-fs-nav="data/modules">Modules</button>
+        <button type="button" data-fs-nav="core">System</button>
+        <button type="button" data-fs-nav="assets">Assets</button>
       </aside>
       <section>
-        <header><input placeholder="Search files" data-file-search><button type="button" data-open="modules">Modules</button></header>
+        <header>
+          <span class="file-breadcrumb" data-file-breadcrumb>.</span>
+          <button type="button" data-file-up>Up</button>
+        </header>
         <div class="file-table" data-file-table>
-          ${rows.map((row) => fileRow(row)).join("")}
+          <div class="file-loading">Loading...</div>
         </div>
       </section>
     </div>`;
   }
 
-  function fileRow([name, kind, detail]) {
-    return `<button class="file-row" type="button" data-file="${escapeHtml(name)}">
-      <span class="file-kind">${kind === "folder" ? "DIR" : kind === "config" ? "CFG" : "FILE"}</span>
-      <strong>${escapeHtml(name)}</strong>
-      <span>${escapeHtml(detail)}</span>
-    </button>`;
+  async function loadFiles(win, path) {
+    state.fileBrowsePath = path || ".";
+    const table = $("[data-file-table]", win);
+    const breadcrumb = $("[data-file-breadcrumb]", win);
+    if (breadcrumb) breadcrumb.textContent = state.fileBrowsePath;
+    table.innerHTML = `<div class="file-loading">Loading...</div>`;
+    const data = await api(`/api/files?path=${encodeURIComponent(state.fileBrowsePath)}`);
+    if (!data || !Array.isArray(data)) {
+      table.innerHTML = `<div class="file-loading">Failed to load</div>`;
+      return;
+    }
+    const dirs = data.filter((e) => e.is_dir).sort((a, b) => a.name.localeCompare(b.name));
+    const files = data.filter((e) => !e.is_dir).sort((a, b) => a.name.localeCompare(b.name));
+    const sorted = [...dirs, ...files];
+    if (sorted.length === 0) {
+      table.innerHTML = `<div class="file-loading">Empty directory</div>`;
+      return;
+    }
+    table.innerHTML = sorted
+      .map((entry) => {
+        const kind = entry.is_dir ? "DIR" : "FILE";
+        const detail = entry.is_dir ? "Folder" : formatBytes(entry.size || 0);
+        return `<button class="file-row" type="button" data-file="${escapeHtml(entry.name)}" data-is-dir="${entry.is_dir}">
+          <span class="file-kind">${kind}</span>
+          <strong>${escapeHtml(entry.name)}</strong>
+          <span>${detail}</span>
+        </button>`;
+      })
+      .join("");
+    bindFileRows(win);
+  }
+
+  function bindFileRows(win) {
+    $$(".file-row", win).forEach((row) => {
+      row.addEventListener("click", () => {
+        const name = row.dataset.file;
+        const isDir = row.dataset.isDir === "true";
+        if (isDir) {
+          const newPath = state.fileBrowsePath === "." ? name : `${state.fileBrowsePath}/${name}`;
+          loadFiles(win, newPath);
+        } else {
+          notify(`${name} selected`);
+        }
+      });
+      row.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        const name = row.dataset.file;
+        openContextMenu(event, [
+          ["Open", () => notify(`${name} opened`)],
+          ["Copy path", () => {
+            const full = state.fileBrowsePath === "." ? name : `${state.fileBrowsePath}/${name}`;
+            navigator.clipboard?.writeText(full);
+            notify("Path copied");
+          }],
+          ["Properties", () => notify(`${name} properties`)],
+        ]);
+      });
+    });
   }
 
   function bindFiles(win) {
-    $$(".file-row", win).forEach((row) => {
-      row.addEventListener("click", () => notify(`${row.dataset.file} selected`));
-      row.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-        openContextMenu(event, [
-          ["Open", () => notify(`${row.dataset.file} opened`)],
-          ["Rename", () => notify("Rename queued")],
-          ["Copy path", () => navigator.clipboard?.writeText(row.dataset.file)],
-          ["Properties", () => notify(`${row.dataset.file} properties`)],
-        ]);
+    loadFiles(win, ".");
+    $("[data-file-up]", win).addEventListener("click", () => {
+      const parts = state.fileBrowsePath.split("/");
+      if (parts.length > 1) {
+        parts.pop();
+        loadFiles(win, parts.join("/") || ".");
+      }
+    });
+    $$("[data-fs-nav]", win).forEach((btn) => {
+      btn.addEventListener("click", () => {
+        $$("[data-fs-nav]", win).forEach((b) => b.classList.remove("is-active"));
+        btn.classList.add("is-active");
+        loadFiles(win, btn.dataset.fsNav);
       });
     });
   }
 
   function renderTerminal() {
     return `<div class="terminal-app">
-      <div class="terminal-output" data-terminal-output>
-        ${state.terminalLines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
-      </div>
+      <div class="terminal-output" data-terminal-output></div>
       <form data-terminal-form>
         <label>vibe@device:~$</label>
         <input name="command" autocomplete="off" spellcheck="false">
@@ -557,52 +631,198 @@
     const output = $("[data-terminal-output]", win);
     const form = $("[data-terminal-form]", win);
     const input = $("input", form);
-    const append = (line) => {
-      state.terminalLines.push(line);
+    const history = [];
+    let historyIndex = -1;
+
+    const append = (line, cls) => {
       const p = document.createElement("p");
+      if (cls) p.className = cls;
       p.textContent = line;
       output.append(p);
       output.scrollTop = output.scrollHeight;
     };
+
+    const appendHtml = (html) => {
+      const p = document.createElement("p");
+      p.innerHTML = html;
+      output.append(p);
+      output.scrollTop = output.scrollHeight;
+    };
+
+    append("VibeOS terminal v1.0");
+    append("Type 'help' for available commands.\n");
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const command = input.value.trim();
       if (!command) return;
+      history.push(command);
+      historyIndex = history.length;
       input.value = "";
       append(`vibe@device:~$ ${command}`);
-      const normalized = command.toLowerCase();
-      if (normalized === "clear") {
-        state.terminalLines = [];
+
+      const parts = command.split(/\s+/);
+      const cmd = parts[0].toLowerCase();
+      const args = parts.slice(1).join(" ");
+
+      if (cmd === "clear") {
         output.replaceChildren();
         return;
       }
-      if (normalized === "help") append("help, apps, open <app>, health, vibe, clear");
-      else if (normalized === "apps") append(appOrder.map((id) => appCatalog[id].title).join(", "));
-      else if (normalized === "vibe") openWindow("vibe");
-      else if (normalized === "health") {
-        try {
-          const response = await fetch("/api/health");
-          append(await response.text());
-        } catch {
-          append("health check failed");
+      if (cmd === "help") {
+        append("Available commands:");
+        append("  help              Show this help");
+        append("  clear             Clear terminal");
+        append("  ls [path]         List files in directory");
+        append("  cat <file>        Show file content");
+        append("  modules           List installed modules");
+        append("  run <module>      Execute a module");
+        append("  delete <module>   Delete a module");
+        append("  health            Check server health");
+        append("  monitor           Show system info");
+        append("  config            Show AI configuration");
+        append("  vibe              Open Vibe generator");
+        append("  apps              List available apps");
+        append("  open <app>        Open an application");
+        append("  echo <text>       Print text");
+        append("");
+        return;
+      }
+      if (cmd === "ls") {
+        const path = args || ".";
+        const data = await api(`/api/files?path=${encodeURIComponent(path)}`);
+        if (!data || !Array.isArray(data)) {
+          append("Error: failed to list files", "err");
+          return;
         }
-      } else if (normalized.startsWith("open ")) {
-        const target = normalized.slice(5).replace(/\s+/g, "-");
-        const id = appOrder.find((candidate) => candidate === target || appCatalog[candidate].title.toLowerCase().replace(/\s+/g, "-") === target);
-        if (id) {
-          openWindow(id);
-          append(`${appCatalog[id].title} opened`);
-        } else append(`unknown app: ${target}`);
-      } else append(`unknown command: ${command}`);
+        if (data.length === 0) {
+          append("(empty directory)");
+          return;
+        }
+        const lines = data.map((e) => {
+          const size = e.is_dir ? "" : `  ${formatBytes(e.size || 0)}`;
+          const name = e.is_dir ? `${e.name}/` : e.name;
+          return `  ${name}${size}`;
+        });
+        appendHtml(lines.map((l) => escapeHtml(l).replace(/\/$/, '<span class="t-dir">$&</span>')).join("\n"));
+        return;
+      }
+      if (cmd === "cat") {
+        if (!args) { append("Usage: cat <file>", "err"); return; }
+        append(`(file content of ${args} would display here)`);
+        append("Note: file viewing is read-only in this version");
+        return;
+      }
+      if (cmd === "modules") {
+        const data = await api("/api/modules");
+        if (!data || !Array.isArray(data) || data.length === 0) {
+          append("No modules installed.");
+          append("Use 'vibe' to generate a new module.");
+          return;
+        }
+        append(`Installed modules (${data.length}):`);
+        data.forEach((m) => {
+          append(`  ${m.id}  v${m.version}  ${m.mode}  ${m.format}  ${m.bytes}B`);
+        });
+        append("");
+        return;
+      }
+      if (cmd === "run") {
+        if (!args) { append("Usage: run <module_path>", "err"); return; }
+        append("Executing...");
+        const data = await api("/api/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: `path=${encodeURIComponent(args)}`,
+        });
+        if (data?.ok) {
+          append(`Output: ${data.output}`);
+        } else {
+          append(`Error: ${data?.error || "execution failed"}`, "err");
+        }
+        return;
+      }
+      if (cmd === "delete") {
+        if (!args) { append("Usage: delete <module_id> <version>", "err"); return; }
+        const delParts = args.split(/\s+/);
+        const id = delParts[0];
+        const version = delParts[1] || "1.0.0";
+        const data = await api(`/api/modules?id=${encodeURIComponent(id)}&version=${encodeURIComponent(version)}`, { method: "DELETE" });
+        if (data?.ok) {
+          append(`Module ${id} v${version} deleted.`);
+        } else {
+          append(`Error: ${data?.error || "delete failed"}`, "err");
+        }
+        return;
+      }
+      if (cmd === "health") {
+        const data = await api("/api/health");
+        append(data ? JSON.stringify(data) : "Server unreachable");
+        return;
+      }
+      if (cmd === "monitor") {
+        const data = await api("/api/monitor");
+        if (!data || data.error) {
+          append("Error: failed to get monitor data", "err");
+          return;
+        }
+        append(`Platform:   ${data.platform}`);
+        append(`PID:        ${data.pid}`);
+        append(`Uptime:     ${formatUptime(data.uptime_secs)}`);
+        append(`Modules:    ${data.module_count}`);
+        append(`Data dir:   ${data.data_dir}`);
+        append("");
+        return;
+      }
+      if (cmd === "config") {
+        const data = await api("/api/config");
+        if (!data || data.error) {
+          append("Error: failed to get config", "err");
+          return;
+        }
+        append(`Protocol:   ${data.protocol}`);
+        append(`Base URL:   ${data.base_url || "(not set)"}`);
+        append(`Model:      ${data.model || "(not set)"}`);
+        append(`API Key:    ${data.has_key ? "configured" : "not set"}`);
+        append("");
+        return;
+      }
+      if (cmd === "vibe") { openWindow("vibe"); return; }
+      if (cmd === "apps") {
+        append(appOrder.map((id) => `${id} (${appCatalog[id].title})`).join(", "));
+        return;
+      }
+      if (cmd === "open") {
+        const target = args.toLowerCase().replace(/\s+/g, "-");
+        const id = appOrder.find((c) => c === target || appCatalog[c].title.toLowerCase().replace(/\s+/g, "-") === target);
+        if (id) { openWindow(id); append(`${appCatalog[id].title} opened`); }
+        else append(`unknown app: ${target}`, "err");
+        return;
+      }
+      if (cmd === "echo") { append(args); return; }
+      append(`unknown command: ${command}`, "err");
+    });
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (historyIndex > 0) { historyIndex--; input.value = history[historyIndex]; }
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (historyIndex < history.length - 1) { historyIndex++; input.value = history[historyIndex]; }
+        else { historyIndex = history.length; input.value = ""; }
+      }
     });
   }
 
   function renderStore() {
     const templates = [
-      ["Calendar", "ui", "Create a calendar app with month, week, reminders, recurring events, and drag-to-reschedule"],
+      ["Calendar", "ui", "Create a calendar app with month view, events, reminders, and right-click edit"],
       ["Photos", "ui", "Create a photo viewer with albums, crop, rotate, tags, and slideshow"],
       ["Music", "ui", "Create a music player with library, playlists, queue, equalizer, and mini player"],
       ["Mail", "ui", "Create an email client with inbox, compose, search, labels, and local draft cache"],
+      ["File Manager", "ui", "Create a file manager with tree view, breadcrumb, rename, delete, and new folder"],
       ["Cleaner", "cli", "Create a command that scans generated modules and prints storage cleanup suggestions"],
       ["Module Fixer", "fix", "Repair the last broken module and produce a versioned replacement"],
     ];
@@ -718,33 +938,101 @@
 
   function renderMonitor() {
     return `<div class="monitor-app" data-monitor>
-      ${["CPU", "Memory", "Modules", "Network", "AI Compiler"].map((name, index) => `
-        <div><span>${name}</span><meter min="0" max="100" value="${24 + index * 13}"></meter><strong>${24 + index * 13}%</strong></div>`).join("")}
+      <div class="monitor-loading">Loading system info...</div>
     </div>`;
   }
 
+  async function loadMonitor(win) {
+    const container = $("[data-monitor]", win);
+    const data = await api("/api/monitor");
+    if (!data || data.error) {
+      container.innerHTML = `<div class="monitor-loading">Failed to load</div>`;
+      return;
+    }
+    container.innerHTML = `
+      <div class="monitor-row"><span>Platform</span><strong>${escapeHtml(data.platform)}</strong></div>
+      <div class="monitor-row"><span>PID</span><strong>${data.pid}</strong></div>
+      <div class="monitor-row"><span>Uptime</span><strong>${formatUptime(data.uptime_secs)}</strong></div>
+      <div class="monitor-row"><span>Modules</span><strong>${data.module_count}</strong></div>
+      <div class="monitor-row"><span>Data Dir</span><strong>${escapeHtml(data.data_dir)}</strong></div>
+    `;
+  }
+
   function bindMonitor(win) {
-    const timer = setInterval(() => {
-      $$("meter", win).forEach((meter) => {
-        const value = Math.floor(12 + Math.random() * 78);
-        meter.value = value;
-        meter.nextElementSibling.textContent = `${value}%`;
-      });
-    }, 1500);
+    loadMonitor(win);
+    const timer = setInterval(() => loadMonitor(win), 5000);
     win.addEventListener("remove", () => clearInterval(timer), { once: true });
   }
 
   function renderModules() {
-    const lastIntent = localStorage.getItem("vibe.lastIntent");
     return `<div class="modules-app">
-      <header><strong>Local modules</strong><button type="button" data-open="vibe">New</button></header>
-      <div class="module-row"><span>latest</span><strong>${escapeHtml(lastIntent || "No module request yet")}</strong><em>VPK</em></div>
-      <div class="module-row"><span>runtime</span><strong>vibeos-core ABI v2</strong><em>OK</em></div>
-      <div class="module-row"><span>host</span><strong>Rust desktop shell</strong><em>OK</em></div>
+      <header><strong>Installed Modules</strong><button type="button" data-open="vibe">New</button></header>
+      <div class="module-loading">Loading modules...</div>
     </div>`;
   }
 
-  function bindModules() {}
+  async function loadModules(win) {
+    const container = $("[data-modules-list]", win) || $(".modules-app", win);
+    const data = await api("/api/modules");
+    const listDiv = container.querySelector(".module-loading") || container;
+    if (!data || !Array.isArray(data) || data.length === 0) {
+      listDiv.outerHTML = `<div class="module-row module-empty"><span>empty</span><strong>No modules installed yet</strong><em>-</em></div>`;
+      return;
+    }
+    state.moduleList = data;
+    const html = data
+      .map(
+        (m) => `<div class="module-row" data-module-path="${escapeHtml(m.path)}" data-module-id="${escapeHtml(m.id)}" data-module-version="${escapeHtml(m.version)}">
+        <span>${escapeHtml(m.mode)}</span>
+        <strong>${escapeHtml(m.id)} v${escapeHtml(m.version)}</strong>
+        <em>${m.bytes}B</em>
+        <button type="button" class="module-run" data-module-path="${escapeHtml(m.path)}">Run</button>
+        <button type="button" class="module-delete" data-module-id="${escapeHtml(m.id)}" data-module-version="${escapeHtml(m.version)}">Del</button>
+      </div>`
+      )
+      .join("");
+    listDiv.outerHTML = html;
+    bindModuleActions(win);
+  }
+
+  function bindModuleActions(win) {
+    $$(".module-run", win).forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const path = btn.dataset.modulePath;
+        notify("Executing module...");
+        const data = await api("/api/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: `path=${encodeURIComponent(path)}`,
+        });
+        if (data?.ok) {
+          notify(`Output: ${data.output}`);
+        } else {
+          notify(`Error: ${data?.error || "failed"}`);
+        }
+      });
+    });
+    $$(".module-delete", win).forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.moduleId;
+        const version = btn.dataset.moduleVersion;
+        if (!confirm(`Delete module ${id} v${version}?`)) return;
+        const data = await api(`/api/modules?id=${encodeURIComponent(id)}&version=${encodeURIComponent(version)}`, { method: "DELETE" });
+        if (data?.ok) {
+          notify(`Module ${id} deleted`);
+          loadModules(win);
+        } else {
+          notify(`Delete failed: ${data?.error || "unknown"}`);
+        }
+      });
+    });
+  }
+
+  function bindModules(win) {
+    loadModules(win);
+  }
 
   nodes.icons.addEventListener("click", (event) => {
     const button = event.target.closest("[data-app-id]");

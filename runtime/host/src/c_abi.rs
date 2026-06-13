@@ -3,15 +3,27 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vibeos_core::c_abi::VibeAbi;
+use vibeos_core::c_abi::{InputEvent, VibeAbi};
 
 #[allow(dead_code)]
 pub fn host_abi(store_root: PathBuf) -> VibeAbi {
     let context = Box::into_raw(Box::new(store_root)) as *mut c_void;
+    build_abi(context)
+}
+
+#[allow(dead_code)]
+pub fn host_abi_with_context(context: *mut c_void, _store_root: PathBuf) -> VibeAbi {
+    build_abi(context)
+}
+
+fn build_abi(context: *mut c_void) -> VibeAbi {
     vibeos_core::c_abi::VibeAbi {
         version: vibeos_core::c_abi::VibeAbi::VERSION,
         context,
         log: host_log,
+        display_get_info: host_display_get_info,
+        display_present: host_display_present,
+        input_poll: host_input_poll,
         store_get: host_store_get,
         store_set: host_store_set,
         time_unix_ms: host_time_unix_ms,
@@ -28,6 +40,27 @@ unsafe extern "C" fn host_log(_context: *mut c_void, message: *const u8, len: us
     let bytes = unsafe { std::slice::from_raw_parts(message, len) };
     let text = String::from_utf8_lossy(bytes);
     println!("[vibe-native] {}", text);
+}
+
+unsafe extern "C" fn host_display_get_info(
+    _context: *mut c_void,
+    width: *mut u32,
+    height: *mut u32,
+) -> i32 {
+    crate::display::get_info(width, height)
+}
+
+unsafe extern "C" fn host_display_present(
+    _context: *mut c_void,
+    width: u32,
+    height: u32,
+    pixels: *const u8,
+) -> i32 {
+    crate::display::present(width, height, pixels)
+}
+
+unsafe extern "C" fn host_input_poll(_context: *mut c_void, event: *mut InputEvent) -> i32 {
+    crate::display::poll(event)
 }
 
 unsafe extern "C" fn host_store_get(

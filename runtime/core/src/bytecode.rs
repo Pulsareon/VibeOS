@@ -240,7 +240,7 @@ impl ModuleLoader for BytecodeLoader {
 /// memory, logs it, and returns it. Returns the length of the generated program.
 pub fn encode_log_program(message: &str, output: &mut [u8]) -> Result<usize, Error> {
     let message = message.as_bytes();
-    let total = 3 + message.len() + 6;
+    let total = 3 + message.len() + 10;
     if output.len() < total || message.len() > u8::MAX as usize {
         return Err(Error::BufferTooSmall);
     }

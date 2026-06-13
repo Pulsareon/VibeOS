@@ -1363,3 +1363,73 @@ body.is-muted .toast {
     grid-template-columns: 1fr;
   }
 }
+
+.terminal-output .err {
+  color: #ff8a8a;
+}
+
+.t-dir {
+  color: #7ec8e3;
+  font-weight: bold;
+}
+
+.file-loading,
+.module-loading,
+.monitor-loading {
+  padding: 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.file-breadcrumb {
+  color: var(--muted);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.module-row {
+  grid-template-columns: 80px 1fr auto auto auto;
+}
+
+.module-empty {
+  grid-template-columns: 80px 1fr auto;
+}
+
+.module-run,
+.module-delete {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.module-run {
+  background: var(--green);
+}
+
+.module-delete {
+  background: var(--red);
+}
+
+.module-run:hover {
+  background: #24704a;
+}
+
+.module-delete:hover {
+  background: #a32e2e;
+}
+
+.monitor-row {
+  grid-template-columns: 140px 1fr;
+}
+
+.monitor-row strong {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+}

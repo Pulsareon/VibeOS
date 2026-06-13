@@ -14,3 +14,4 @@ serde_json = "1"
 vibeos-core = { path = "../core" }
 libloading = "0.8"
 tempfile = "3"
+minifb = "0.27"

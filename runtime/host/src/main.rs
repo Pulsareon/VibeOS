@@ -7,7 +7,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use vibeos_core::bytecode::{BytecodeLoader, encode_log_program};
 use vibeos_core::capability::{CapabilityId, CapabilityRequirement, CapabilityVersion};
 use vibeos_core::module::{ModuleFormat, ModulePackage, ModuleRegistry, ModuleTarget, Version};
@@ -15,6 +15,7 @@ use vibeos_core::{OP_VIBE_CLI, OP_VIBE_FIX, OP_VIBE_UI, VibeMode};
 
 mod c_abi;
 mod capability;
+mod display;
 mod native_loader;
 
 const MAX_REQUEST_SIZE: usize = 1024 * 1024;
@@ -24,6 +25,7 @@ struct Host {
     data: PathBuf,
     store_lock: Mutex<()>,
     capabilities: Mutex<HostCapabilityRegistry>,
+    started: Instant,
 }
 
 struct SavedModule {
@@ -77,6 +79,8 @@ fn main() -> std::io::Result<()> {
         return healthcheck();
     }
 
+    display::start_display_thread();
+
     let root = env::var("VIBE_ROOT")
         .map(PathBuf::from)
         .unwrap_or(env::current_dir()?);
@@ -96,6 +100,7 @@ fn main() -> std::io::Result<()> {
         data,
         store_lock: Mutex::new(()),
         capabilities: Mutex::new(capabilities),
+        started: Instant::now(),
     });
     let listener = TcpListener::bind(&address)?;
 
@@ -167,6 +172,7 @@ fn handle_connection(mut stream: TcpStream, host: &Host) -> std::io::Result<()> 
     let method = request_parts.next().unwrap_or_default().to_owned();
     let target = request_parts.next().unwrap_or("/");
     let path = target.split('?').next().unwrap_or("/").to_owned();
+    let query = target.split('?').nth(1).unwrap_or("").to_owned();
     let content_length = lines
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
@@ -213,10 +219,247 @@ fn handle_connection(mut stream: TcpStream, host: &Host) -> std::io::Result<()> 
             b"",
             &[
                 ("Access-Control-Allow-Origin", "*"),
-                ("Access-Control-Allow-Methods", "GET,POST,OPTIONS"),
+                ("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS"),
                 ("Access-Control-Allow-Headers", "Content-Type"),
             ],
         ),
+        ("GET", "/api/modules") => {
+            let modules_dir = host.data.join("modules");
+            let mut entries = Vec::new();
+            if let Ok(dir) = fs::read_dir(&modules_dir) {
+                for entry in dir.flatten() {
+                    if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    let module_dir = entry.path();
+                    if let Ok(vpk_files) = fs::read_dir(&module_dir) {
+                        for vpk in vpk_files.flatten() {
+                            let vpk_path = vpk.path();
+                            if vpk_path.extension().and_then(|e| e.to_str()) != Some("vpk") {
+                                continue;
+                            }
+                            if let Ok(bytes) = fs::read(&vpk_path) {
+                                if let Ok(package) = ModulePackage::decode(&bytes) {
+                                    let id = String::from_utf8_lossy(package.id).to_string();
+                                    let version = format!(
+                                        "{}.{}.{}",
+                                        package.version.major,
+                                        package.version.minor,
+                                        package.version.patch
+                                    );
+                                    let mode_str = match package.mode {
+                                        VibeMode::Cli => "Cli",
+                                        VibeMode::Ui => "Ui",
+                                        VibeMode::Fix => "Fix",
+                                    };
+                                    let format_str = match package.format {
+                                        ModuleFormat::VibeBytecode => "VibeBytecode",
+                                        ModuleFormat::NativeBinary => "NativeBinary",
+                                        _ => "Unknown",
+                                    };
+                                    let path_display = vpk_path
+                                        .strip_prefix(&host.root)
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_else(|_| vpk_path.display().to_string());
+                                    entries.push(format!(
+                                        r#"{{"id":"{}","version":"{}","mode":"{}","format":"{}","bytes":{},"path":"{}"}}"#,
+                                        json_escape(&id), version, mode_str, format_str, bytes.len(), json_escape(&path_display)
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            json_response(&mut stream, 200, &format!("[{}]", entries.join(",")))
+        }
+        ("GET", "/api/files") => {
+            let rel_path = query_param(&query, "path").unwrap_or_else(|| ".".into());
+            if rel_path.contains("..") {
+                return json_response(
+                    &mut stream,
+                    403,
+                    r#"{"ok":false,"error":"path_traversal_forbidden"}"#,
+                );
+            }
+            let target_dir = host.root.join(&rel_path);
+            let Ok(target_dir) = target_dir.canonicalize() else {
+                return json_response(
+                    &mut stream,
+                    404,
+                    r#"{"ok":false,"error":"directory_not_found"}"#,
+                );
+            };
+            if !target_dir.starts_with(&host.root) {
+                return json_response(
+                    &mut stream,
+                    403,
+                    r#"{"ok":false,"error":"path_traversal_forbidden"}"#,
+                );
+            }
+            let mut entries = Vec::new();
+            if let Ok(dir) = fs::read_dir(&target_dir) {
+                for entry in dir.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                    if is_dir {
+                        entries.push(format!(
+                            r#"{{"name":"{}","is_dir":true}}"#,
+                            json_escape(&name)
+                        ));
+                    } else {
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        entries.push(format!(
+                            r#"{{"name":"{}","is_dir":false,"size":{}}}"#,
+                            json_escape(&name),
+                            size
+                        ));
+                    }
+                }
+            }
+            json_response(&mut stream, 200, &format!("[{}]", entries.join(",")))
+        }
+        ("POST", "/api/execute") => {
+            let body_str = String::from_utf8_lossy(body);
+            let rel_path = match form_field(&body_str, "path") {
+                Some(p) if !p.is_empty() => p,
+                _ => {
+                    return json_response(
+                        &mut stream,
+                        400,
+                        r#"{"ok":false,"error":"missing_path"}"#,
+                    );
+                }
+            };
+            if rel_path.contains("..") {
+                return json_response(
+                    &mut stream,
+                    403,
+                    r#"{"ok":false,"error":"path_traversal_forbidden"}"#,
+                );
+            }
+            let vpk_path = host.root.join(&rel_path);
+            let Ok(vpk_path) = vpk_path.canonicalize() else {
+                return json_response(&mut stream, 404, r#"{"ok":false,"error":"file_not_found"}"#);
+            };
+            if !vpk_path.starts_with(&host.root) {
+                return json_response(
+                    &mut stream,
+                    403,
+                    r#"{"ok":false,"error":"path_traversal_forbidden"}"#,
+                );
+            }
+            match execute_saved_module(host, &vpk_path) {
+                Ok(output) => {
+                    let output_str = String::from_utf8_lossy(&output);
+                    json_response(
+                        &mut stream,
+                        200,
+                        &format!(r#"{{"ok":true,"output":"{}"}}"#, json_escape(&output_str)),
+                    )
+                }
+                Err(error) => json_response(
+                    &mut stream,
+                    500,
+                    &format!(
+                        r#"{{"ok":false,"error":"{}"}}"#,
+                        json_escape(&error.to_string())
+                    ),
+                ),
+            }
+        }
+        ("GET", "/api/monitor") => {
+            let uptime = host.started.elapsed().as_secs();
+            let pid = std::process::id();
+            let modules_dir = host.data.join("modules");
+            let module_count = fs::read_dir(&modules_dir)
+                .map(|dir| {
+                    dir.flatten()
+                        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+                        .count()
+                })
+                .unwrap_or(0);
+            let data_dir = host.data.display().to_string();
+            let platform = format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH);
+            json_response(
+                &mut stream,
+                200,
+                &format!(
+                    r#"{{"uptime_secs":{},"pid":{},"module_count":{},"data_dir":"{}","platform":"{}"}}"#,
+                    uptime,
+                    pid,
+                    module_count,
+                    json_escape(&data_dir),
+                    json_escape(&platform)
+                ),
+            )
+        }
+        ("GET", "/api/config") => {
+            let config = load_ai_config(host)?.unwrap_or_default();
+            let has_key = !config.api_key.trim().is_empty();
+            json_response(
+                &mut stream,
+                200,
+                &format!(
+                    r#"{{"protocol":"{}","base_url":"{}","model":"{}","has_key":{}}}"#,
+                    config.protocol.as_str(),
+                    json_escape(&config.base_url),
+                    json_escape(&config.model),
+                    has_key
+                ),
+            )
+        }
+        ("DELETE", "/api/modules") => {
+            let id = match query_param(&query, "id") {
+                Some(id) => id,
+                None => {
+                    return json_response(&mut stream, 400, r#"{"ok":false,"error":"missing_id"}"#);
+                }
+            };
+            let version = match query_param(&query, "version") {
+                Some(v) => v,
+                None => {
+                    return json_response(
+                        &mut stream,
+                        400,
+                        r#"{"ok":false,"error":"missing_version"}"#,
+                    );
+                }
+            };
+            let vpk_path = host
+                .data
+                .join("modules")
+                .join(&id)
+                .join(format!("{}.vpk", version));
+            if !vpk_path.exists() {
+                return json_response(
+                    &mut stream,
+                    404,
+                    r#"{"ok":false,"error":"module_not_found"}"#,
+                );
+            }
+            match fs::remove_file(&vpk_path) {
+                Ok(()) => {
+                    let parent = vpk_path.parent().unwrap_or(&vpk_path);
+                    if parent.exists()
+                        && fs::read_dir(parent)
+                            .map(|mut d| d.next().is_none())
+                            .unwrap_or(false)
+                    {
+                        let _ = fs::remove_dir(parent);
+                    }
+                    json_response(&mut stream, 200, r#"{"ok":true}"#)
+                }
+                Err(error) => json_response(
+                    &mut stream,
+                    500,
+                    &format!(
+                        r#"{{"ok":false,"error":"{}"}}"#,
+                        json_escape(&error.to_string())
+                    ),
+                ),
+            }
+        }
         ("GET", _) => serve_static(&mut stream, host, &path),
         _ => json_response(&mut stream, 404, r#"{"ok":false,"error":"not_found"}"#),
     }
@@ -620,13 +863,20 @@ fn module_shape(mode: VibeMode) -> (ModuleFormat, ModuleTarget) {
 }
 
 fn module_capabilities(_mode: VibeMode) -> Vec<u8> {
-    let req = CapabilityRequirement {
-        id: CapabilityId::from_str("sys:log").unwrap(),
-        min_version: CapabilityVersion::new(1, 0),
-    };
-    let mut buffer = vec![0u8; 64];
-    let len = req.encode(&mut buffer).unwrap();
-    buffer.truncate(len);
+    let mut buffer = Vec::new();
+    for (name, major, minor) in [
+        ("sys:log", 1u16, 0u16),
+        ("sys:display", 1u16, 0u16),
+        ("sys:input", 1u16, 0u16),
+    ] {
+        let req = CapabilityRequirement {
+            id: CapabilityId::from_str(name).unwrap(),
+            min_version: CapabilityVersion::new(major, minor),
+        };
+        let mut tmp = [0u8; 64];
+        let len = req.encode(&mut tmp).unwrap();
+        buffer.extend_from_slice(&tmp[..len]);
+    }
     buffer
 }
 
@@ -796,21 +1046,32 @@ fn call_ai(config: &AiConfig, mode: VibeMode, intent: &str) -> Result<String, St
             "You are the VibeOS Native UI module compiler. The user intent is: {}.\n\
              Generate a minimal Rust native VibeOS module as plain source code.\n\
              Requirements:\n\
-             1. Start with `use vibeos_core::c_abi::{{VibeAbi, VIBE_MODULE_OK}};`\n\
-             2. Define `#[unsafe(no_mangle)] pub unsafe extern \"C\" fn vibe_module_main(abi: *const VibeAbi) -> i32`\n\
-             3. Log a short message describing the UI using `(abi.log)(abi.context, msg.as_ptr(), msg.len() - 1)`\n\
-             4. Return VIBE_MODULE_OK\n\
-             Return ONLY the Rust source code, no markdown, no explanation.",
+             1. Start with `use vibeos_core::c_abi::{{VibeAbi, VIBE_MODULE_OK, InputEvent}};`\n\
+             2. Define `#[unsafe(no_mangle)] pub unsafe extern \"C\" fn vibe_module_main(abi: *const VibeAbi) -> i32` and inside use `let abi = unsafe {{ &*abi }};`\n\
+             3. InputEvent has fields {{ kind: u8, x: i32, y: i32, code: u32 }}; initialize with `InputEvent {{ kind: 0, x: 0, y: 0, code: 0 }}`\n\
+             4. Use `let mut width: u32 = 0; let mut height: u32 = 0;` and call `(abi.display_get_info)(abi.context, &mut width as *mut u32, &mut height as *mut u32);` to get the screen size\n\
+             5. Allocate a `Vec<u8>` of size `(width * height * 4) as usize` for RGBA pixels\n\
+             6. Draw a simple full-screen UI by filling pixels (e.g. blue background, white rectangle, text is optional)\n\
+             7. Call `(abi.display_present)(abi.context, width, height, pixels.as_ptr())` to show the frame\n\
+             8. Optionally call `(abi.input_poll)(abi.context, &mut event)` a few times\n\
+             9. Return VIBE_MODULE_OK\n\
+             Return ONLY the Rust source code, no markdown, no explanation.\n\
+             Example snippet for drawing:\n\
+             let i = ((y * width + x) * 4) as usize; pixels[i] = r; pixels[i+1] = g; pixels[i+2] = b; pixels[i+3] = 255;",
             intent
         ),
         VibeMode::Fix => format!(
             "You are the VibeOS Fix module compiler. The user intent is: {}.\n\
              Generate a minimal Rust native VibeOS module as plain source code.\n\
              Requirements:\n\
-             1. Start with `use vibeos_core::c_abi::{{VibeAbi, VIBE_MODULE_OK}};`\n\
-             2. Define `#[unsafe(no_mangle)] pub unsafe extern \"C\" fn vibe_module_main(abi: *const VibeAbi) -> i32`\n\
-             3. Log a short message describing the fix using `(abi.log)(abi.context, msg.as_ptr(), msg.len() - 1)`\n\
-             4. Return VIBE_MODULE_OK\n\
+             1. Start with `use vibeos_core::c_abi::{{VibeAbi, VIBE_MODULE_OK, InputEvent}};`\n\
+             2. Define `#[unsafe(no_mangle)] pub unsafe extern \"C\" fn vibe_module_main(abi: *const VibeAbi) -> i32` and inside use `let abi = unsafe {{ &*abi }};`\n\
+             3. InputEvent has fields {{ kind: u8, x: i32, y: i32, code: u32 }}; initialize with `InputEvent {{ kind: 0, x: 0, y: 0, code: 0 }}`\n\
+             4. Use `let mut width: u32 = 0; let mut height: u32 = 0;` and call `(abi.display_get_info)(abi.context, &mut width as *mut u32, &mut height as *mut u32);` to get the screen size\n\
+             5. Allocate a `Vec<u8>` of size `(width * height * 4) as usize` for RGBA pixels\n\
+             6. Draw a simple full-screen UI by filling pixels (e.g. green background with a status indicator)\n\
+             7. Call `(abi.display_present)(abi.context, width, height, pixels.as_ptr())` to show the frame\n\
+             8. Return VIBE_MODULE_OK\n\
              Return ONLY the Rust source code, no markdown, no explanation.",
             intent
         ),
@@ -1079,6 +1340,13 @@ fn form_field(input: &str, key: &str) -> Option<String> {
     })
 }
 
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        (percent_decode(name) == key).then(|| percent_decode(value))
+    })
+}
+
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
@@ -1192,6 +1460,7 @@ mod tests {
             data: data.clone(),
             store_lock: Mutex::new(()),
             capabilities: Mutex::new(HostCapabilityRegistry::new(data.join("store"))),
+            started: Instant::now(),
         };
 
         let first = save_vibe_module(&host, VibeMode::Ui, "native window", "ui", "ai").unwrap();
